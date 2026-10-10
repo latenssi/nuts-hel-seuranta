@@ -312,26 +312,21 @@
     return Date.now() / 1000 - eventNow;
   }
 
-  // Same rules as RaceResult's own map worker (MarkerWait on).
+  // RaceResult's map rules, minus its "MarkerWait": when a split's predicted time has passed but its timing data
+  // hasn't arrived (it can lag a lot), keep moving on the predictions instead of parking the marker at the split.
   function position(state, v) {
     const { splits, times, exists } = state;
     const lastIdx = exists.lastIndexOf("1");
-    const nextPred = times.findIndex((t, i) => exists[i] === "0" && t > v && i > lastIdx);
-    let wait = -1;
-    if (lastIdx !== -1) {
-      const s = splits.findIndex((_, i) => i > lastIdx);
-      if (s !== -1 && (nextPred === -1 || s < nextPred)) wait = s;
-    }
     if (times.every(t => t === 0)) return { status: "hidden" };
     if (exists[exists.length - 1] === "1") return { status: "finished", dist: state.totalLength };
-    if (wait === -1 && nextPred === -1) return { status: "finished", dist: state.totalLength };
-    if (wait > 0) return { status: "waiting", dist: splits[wait].distance, at: wait };
-    if (nextPred === -1 || nextPred === 0) return { status: "notstarted" };
-    const n = nextPred;
+    const n = times.findIndex((t, i) => exists[i] === "0" && t > v && i > lastIdx);
+    if (n === 0 || (n === -1 && lastIdx === -1)) return { status: "notstarted" };
+    if (n === -1) return { status: "waiting", dist: state.totalLength, at: splits.length - 1 }; // past every prediction
     if (times[n] <= times[n - 1]) return { status: "waiting", dist: splits[n - 1].distance, at: n - 1 };
     const d = splits[n - 1].distance + (splits[n].distance - splits[n - 1].distance) / (times[n] - times[n - 1]) * Math.max(v - times[n - 1], 0);
-    return { status: "moving", dist: d, next: n };
+    return { status: lastIdx >= 0 && n - 1 > lastIdx ? "late" : "moving", dist: d, next: n };
   }
+
 
   // Rows from SplitsAndLegs: TOD "1:10:51:56" (day:clock), Chip = from start line.
   function renderSplitTable(tbody, sp) {
@@ -385,7 +380,7 @@
 
     const pct = Math.min(100, p.dist / r.state.totalLength * 100);
     ui.prog.style.width = pct.toFixed(1) + "%";
-    const statusTxt = { moving: "", waiting: " (odottaa väliaikaa)", finished: " (maalissa)" }[p.status];
+    const statusTxt = { moving: "", late: " (arvio, väliaika viipyy)", waiting: " (odottaa väliaikaa)", finished: " (maalissa)" }[p.status];
     ui.est.textContent = `${km(p.dist)} / ${km(r.state.totalLength)}${statusTxt}`;
     if (lastIdx >= 0) ui.last.textContent = `${splitName(splits[lastIdx].name)} klo ${clock(times[lastIdx])}`;
     // Average pace from the start to the last split passed (whole course once finished).
@@ -468,7 +463,7 @@
   // Per-event settings differ (list name, details page, server): read them like RaceResult's own page does.
   function getConfig() {
     return cfgPromise ||= (async () => {
-      const r = await fetch(`https://my.raceresult.com/${EVENT}/live/config?lang=fi`);
+      const r = await fetch(`https://my.raceresult.com/${EVENT}/live/config?lang=fi`, { signal: AbortSignal.timeout(30000) });
       if (!r.ok) throw new Error("HTTP " + r.status);
       const c = await r.json();
       const list = (c.TabConfig?.Lists || []).find(l => !l.Mode);
@@ -480,7 +475,7 @@
   function loadRoute(cid) {
     if (!routes.has(cid)) {
       routes.set(cid, (async () => {
-        const g = await fetch(`${server}/${EVENT}/${(await getConfig()).details}/gpx/${cid}`);
+        const g = await fetch(`${server}/${EVENT}/${(await getConfig()).details}/gpx/${cid}`, { signal: AbortSignal.timeout(30000) });
         if (!g.ok) throw new Error("Reitin haku epäonnistui (HTTP " + g.status + ")");
         const track = buildTrack(await g.text());
         const line = L.polyline(track.pts, { color: getVar("--route"), weight: 4, opacity: .9 }).addTo(map);
@@ -501,8 +496,13 @@
 
   async function fetchView(r) {
     const cfg = await getConfig();
-    const url = `${server}/${EVENT}/${cfg.details}/view?lang=fi&mid=${r.mid}&standalone=false&pid=${encodeURIComponent(r.pid)}`;
-    const res = await fetch(url, { cache: "no-store" });
+    // The MID shortcut can answer "unchanged" even after a new split time has arrived (seen live), so ask for the
+    // full view every third poll, and every poll while a split time is expected (its predicted time has passed).
+    const expecting = r.state && ["late", "waiting"].includes(position(r.state, eventNow(r)).status);
+    const mid = !expecting && ++r.polls % 3 ? r.mid : 0;
+    const url = `${server}/${EVENT}/${cfg.details}/view?lang=fi&mid=${mid}&standalone=false&pid=${encodeURIComponent(r.pid)}`;
+    // A request that never settles would stall this runner's loop for good (e.g. phone switching networks).
+    const res = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(30000) });
     if (!res.ok) throw new Error("HTTP " + res.status);
     const j = await res.json();
     if (r.stopped) return;
@@ -646,7 +646,7 @@
       const dd = li.querySelectorAll("dd");
       const r = {
         pid, color, state: null, clockOffset: 0, lastFetchOk: Date.now(), error: null,
-        cid: null, route: null, marker: null, done: null, timer: 0, stopped: false, mid: 0, live: true, paused: false,
+        cid: null, route: null, marker: null, done: null, timer: 0, stopped: false, mid: 0, polls: 0, live: true, paused: false,
         ui: {
           li, label: li.querySelector(".pill"), name: li.querySelector(".r-name"), sub: li.querySelector(".sub"),
           est: li.querySelector(".r-est"), prog: li.querySelector(".bar > div"), more: li.querySelector(".r-more"), splits: li.querySelector("tbody"),
