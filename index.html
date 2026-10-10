@@ -330,7 +330,7 @@
       drawRunner(r);
       const who = r.state?.label || r.pid;
       if (r.error) msg ||= `Tietojen haku epäonnistui (${who}): ${r.error}. Yritetään uudelleen.`;
-      else if (Date.now() - r.lastFetchOk > 60000) msg ||= `Tietoja (${who}) ei ole saatu yli minuuttiin. Tarkista verkkoyhteys.`;
+      else if (r.live && !r.paused && Date.now() - r.lastFetchOk > 60000) msg ||= `Tietoja (${who}) ei ole saatu yli minuuttiin. Tarkista verkkoyhteys.`;
     }
     if (msg === lastNote) return;
     lastNote = msg;
@@ -398,13 +398,16 @@
   }
 
   async function fetchView(r) {
-    const url = `${server}/${EVENT}/details/view?lang=fi&mid=0&standalone=false&pid=${encodeURIComponent(r.pid)}`;
+    const url = `${server}/${EVENT}/details/view?lang=fi&mid=${r.mid}&standalone=false&pid=${encodeURIComponent(r.pid)}`;
     const res = await fetch(url, { cache: "no-store" });
     if (!res.ok) throw new Error("HTTP " + res.status);
     const j = await res.json();
     if (r.stopped) return;
     if (j.Server) server = "https://" + j.Server;
     if (j.LiveUpdateInterval) liveInterval = Math.max(5, j.LiveUpdateInterval);
+    if (j.LiveUpdate === false) r.live = false; // server asks clients to stop polling
+    // Like RaceResult's own page: send the last MID, and an unchanged view comes back as a tiny {status:304}.
+    if (j.status === 304) { r.lastFetchOk = Date.now(); r.error = null; return; }
 
     const markers = j.Data?.MapDetails?.Markers || {};
     let found = null;
@@ -450,18 +453,26 @@
       if (!fittedOnce) { map.fitBounds(r.route.line.getBounds(), { padding: [30, 30] }); fittedOnce = true; }
       drawSplits(r.cid);
     } else if (changed) drawSplits(r.cid);
+    r.mid = j.MID || 0; // only after a full, successful update
     draw();
   }
 
+  // No polling while the tab is hidden; visibilitychange resumes it.
   async function loop(r) {
+    r.timer = 0;
+    if (document.hidden) { r.paused = true; return; }
     try { await fetchView(r); }
     catch (e) {
       if (r.stopped) return;
       r.error = e.message;
       draw();
     }
-    if (!r.stopped) r.timer = setTimeout(() => loop(r), liveInterval * 1000);
+    if (!r.stopped && r.live) r.timer = setTimeout(() => loop(r), liveInterval * 1000);
   }
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) return;
+    for (const r of runners.values()) if (r.paused) { r.paused = false; r.lastFetchOk = Date.now(); loop(r); }
+  });
 
   function setUrl() {
     try {
@@ -523,7 +534,7 @@
       const dd = li.querySelectorAll("dd");
       const r = {
         pid, color, state: null, clockOffset: 0, lastFetchOk: Date.now(), error: null,
-        cid: null, route: null, marker: null, done: null, timer: 0, stopped: false,
+        cid: null, route: null, marker: null, done: null, timer: 0, stopped: false, mid: 0, live: true, paused: false,
         ui: {
           li, label: li.querySelector(".pill"), name: li.querySelector(".r-name"), sub: li.querySelector(".sub"),
           est: li.querySelector(".r-est"), prog: li.querySelector(".bar > div"), more: li.querySelector(".r-more"), splits: li.querySelector("tbody"),
