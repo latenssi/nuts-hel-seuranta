@@ -261,7 +261,7 @@
     for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + hav(pts[i - 1], pts[i]));
     return { pts, cum, length: cum[cum.length - 1] };
   }
-  // Point and slice along the track by metres on the GPX line.
+  // Point along the track by metres on the GPX line.
   function along(track, m) {
     const { pts, cum } = track;
     m = Math.max(0, Math.min(m, track.length));
@@ -269,10 +269,6 @@
     while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (cum[mid] <= m) lo = mid; else hi = mid; }
     const seg = cum[hi] - cum[lo], t = seg > 0 ? (m - cum[lo]) / seg : 0;
     return { latlng: [pts[lo][0] + (pts[hi][0] - pts[lo][0]) * t, pts[lo][1] + (pts[hi][1] - pts[lo][1]) * t], idx: lo };
-  }
-  function sliceTo(track, m) {
-    const a = along(track, m);
-    return track.pts.slice(0, a.idx + 1).concat([a.latlng]);
   }
 
   // ---------- formatting ----------
@@ -371,8 +367,8 @@
         zIndexOffset: r.pid === focusPid ? 2000 : 1000, keyboard: false
       }).addTo(map);
     } else r.marker.setLatLng(pos);
-    if (r.done) r.done.setLatLngs(sliceTo(track, gpxM));
-    else r.done = L.polyline(sliceTo(track, gpxM), { color: r.color, weight: 6, opacity: .95 }).addTo(map);
+    r.progress = p.dist;
+    paintDone(r, track, gpxM);
 
     if (follow && r.pid === focusPid) {
       // First known position of the chosen runner: zoom in like the "Seuraa" button; afterwards just keep it in view.
@@ -412,6 +408,42 @@
   }
 
   let lastNote;
+  // The covered route is drawn in 200 m pieces, each stamped with when its runner passed it, and pieces are stacked by
+  // that time. Wherever routes overlap (also 14 km over 25 km at different kilometres), whoever passed last is on top.
+  const PIECE = 200;
+  let restack = false;
+  function passedAt(state, d) { // event time at event distance d: actual split times, predictions beyond
+    const { splits, times } = state;
+    let j = 0;
+    while (j < splits.length - 2 && splits[j + 1].distance < d) j++;
+    const span = splits[j + 1].distance - splits[j].distance || 1;
+    return times[j] + (times[j + 1] - times[j]) * Math.min(1, Math.max(0, (d - splits[j].distance) / span));
+  }
+  function sliceBetween(track, m0, m1) {
+    const a = along(track, m0), b = along(track, m1);
+    return [a.latlng, ...track.pts.slice(a.idx + 1, b.idx + 1), b.latlng];
+  }
+  function paintDone(r, track, gpxM) {
+    r.done ||= L.layerGroup().addTo(map);
+    r.pieces ||= [];
+    const full = Math.floor(gpxM / PIECE), ratio = track.length / r.state.totalLength;
+    while (r.pieces.length > full + 1) r.done.removeLayer(r.pieces.pop()); // position corrected backwards
+    for (let i = Math.max(0, r.pieces.length - 1); i <= full; i++) {
+      const latlngs = sliceBetween(track, i * PIECE, Math.min((i + 1) * PIECE, gpxM));
+      const t = i < full ? passedAt(r.state, (i + 1) * PIECE / ratio) : Infinity; // in progress: newest of all
+      if (r.pieces[i]) r.pieces[i].setLatLngs(latlngs);
+      else { r.pieces[i] = L.polyline(latlngs, { color: r.color, weight: 6, opacity: .95 }).addTo(r.done); restack = true; }
+      if (r.pieces[i].t !== t) { r.pieces[i].t = t; restack = true; }
+    }
+  }
+  function restackPieces() {
+    if (!restack) return;
+    restack = false;
+    const all = [...runners.values()].flatMap(r => (r.pieces || []).map(p => [p, r.progress]));
+    all.sort((a, b) => a[0].t - b[0].t || b[1] - a[1]); // ties (pieces in progress): trailing runner on top
+    for (const [p] of all) p.bringToFront();
+  }
+
   function draw() {
     let msg = null;
     for (const r of runners.values()) {
@@ -421,6 +453,7 @@
       if (r.error) msg ||= `Tietojen haku epäonnistui (${who}): ${r.error}. Yritetään uudelleen.`;
       else if (r.live && !r.paused && Date.now() - r.lastFetchOk > 60000) msg ||= `Tietoja (${who}) ei ole saatu yli minuuttiin. Tarkista verkkoyhteys.`;
     }
+    restackPieces();
     const text = msg || (REPLAY === null ? DEFAULT_NOTE : `Toisto ${SPEED}× · klo ${clock(replayClock())}`);
     if (text === lastNote) return;
     lastNote = text;
@@ -559,7 +592,7 @@
     if (r.cid !== found.cid) {
       const oldCid = r.cid;
       r.cid = found.cid; r.route = null;
-      if (r.done) { map.removeLayer(r.done); r.done = null; }
+      if (r.done) { map.removeLayer(r.done); r.done = null; r.pieces = null; }
       try { r.route = await loadRoute(r.cid); } catch (e) { r.cid = null; throw e; }
       if (r.stopped) return;
       pruneRoutes();
