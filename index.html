@@ -187,7 +187,9 @@
       const first = tvShown === null;
       tvShown = r.pid;
       if (first) map.setView(center, TV_ZOOM, { animate: false });
-      else tvMove(() => map.flyTo(center, TV_ZOOM, { duration: 2 }));
+      // Glide at the same zoom (a near runner) or jump (a far one). flyTo changes zoom mid-move, and lines being
+      // redrawn 4×/s during it get projected at the wrong scale and wander across the map.
+      else tvMove(() => map.setView(center, TV_ZOOM, { pan: { duration: 1.5 } }));
       return;
     }
     const p = map.latLngToContainerPoint(pos);
