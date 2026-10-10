@@ -18,6 +18,7 @@
     --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
   html, body { height: 100%; margin: 0; background: #1b211d; font-family: var(--font); }
+  [hidden] { display: none !important; }
   #map { position: absolute; inset: 0; }
   .card {
     position: absolute; z-index: 1000; left: 12px; bottom: calc(24px + env(safe-area-inset-bottom, 0px));
@@ -63,6 +64,20 @@
   }
   #results .r-bib { font-weight: 700; font-variant-numeric: tabular-nums; grid-row: span 2; align-self: center; }
   #results .r-meta { color: var(--muted); font-size: 12px; min-width: 0; }
+  #runners { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; max-height: 45vh; overflow-y: auto; }
+  .runner { border-left: 3px solid var(--c); padding-left: 8px; }
+  .r-head { display: flex; gap: 6px; align-items: center; }
+  .r-focus {
+    flex: 1; min-width: 0; display: flex; gap: 8px; align-items: center; text-align: left;
+    background: none; border: 0; padding: 2px 0;
+  }
+  .pill { background: var(--c); color: #fff; font-weight: 700; font-size: 12px; padding: 2px 7px; border-radius: 10px; font-variant-numeric: tabular-nums; }
+  .r-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .r-remove { padding: 1px 8px; }
+  .runner .sub { margin: 0; }
+  .runner .bar { margin: 5px 0 2px; }
+  .runner .bar > div { background: var(--c); }
+  .runner .grid { margin-top: 6px; }
 </style>
 </head>
 <body>
@@ -74,34 +89,26 @@
   <input id="q" type="search" autocomplete="off" enterkeyhint="search" placeholder="esim. Virtanen tai 168">
   <ul id="results"></ul>
   <div class="note" id="pickNote">Haku löytää matkaan lähteneet juoksijat.</div>
+  <div class="row"><button id="back" type="button" hidden>Takaisin seurantaan</button></div>
 </div>
 <div id="view" hidden>
-  <h1 id="name">Ladataan…</h1>
-  <div class="sub" id="sub">NUTS HEL 2026</div>
-  <dl class="grid">
-    <dt>Arvio nyt</dt><dd id="est">–</dd>
-    <dt>Viimeksi</dt><dd id="last">–</dd>
-    <dt>Seuraava</dt><dd id="next">–</dd>
-    <dt>Vauhti</dt><dd id="pace">–</dd>
-  </dl>
-  <div class="bar"><div id="prog"></div></div>
+  <ul id="runners"></ul>
   <div class="row">
-    <button id="follow" type="button" aria-pressed="true">Seuraa juoksijaa</button>
+    <button id="follow" type="button" aria-pressed="true">Seuraa valittua</button>
     <button id="fit" type="button">Koko reitti</button>
   </div>
   <div class="row">
+    <button id="add" type="button">Lisää juoksija</button>
     <button id="share" type="button">Kopioi linkki</button>
-    <button id="change" type="button">Vaihda juoksijaa</button>
   </div>
   <div class="note" id="note">Sijainti on ajanottoon perustuva arvio, ei GPS. Päivittyy 10 s välein.</div>
 </div>
 </section>
 <script>
 (() => {
-  // Runner is chosen by search, or by ?pid=<RaceResult id> / ?bib=<number> in the link.
+  // Runners are chosen by search, or by ?pid=<RaceResult id>,... / ?bib=<number>,... in the link.
   const qs = new URLSearchParams(location.search);
   const EVENT = qs.get("event") || "371720";
-  let PID = qs.get("pid");
   let server = "https://my2.raceresult.com";
 
   const $ = id => document.getElementById(id);
@@ -137,7 +144,7 @@
     const s = Math.sin(dLat / 2) ** 2 + Math.cos(a[0] * toRad) * Math.cos(b[0] * toRad) * Math.sin(dLon / 2) ** 2;
     return 2 * R * Math.asin(Math.sqrt(s));
   }
-  let track = null; // { pts: [[lat,lon]], cum: [m], length }
+  // track: { pts: [[lat,lon]], cum: [m], length }
   function buildTrack(gpxText) {
     const doc = new DOMParser().parseFromString(gpxText, "text/xml");
     let nodes = doc.getElementsByTagName("rtept");
@@ -153,7 +160,7 @@
     return { pts, cum, length: cum[cum.length - 1] };
   }
   // Point and slice along the track by metres on the GPX line.
-  function along(m) {
+  function along(track, m) {
     const { pts, cum } = track;
     m = Math.max(0, Math.min(m, track.length));
     let lo = 0, hi = cum.length - 1;
@@ -161,8 +168,8 @@
     const seg = cum[hi] - cum[lo], t = seg > 0 ? (m - cum[lo]) / seg : 0;
     return { latlng: [pts[lo][0] + (pts[hi][0] - pts[lo][0]) * t, pts[lo][1] + (pts[hi][1] - pts[lo][1]) * t], idx: lo };
   }
-  function sliceTo(m) {
-    const a = along(m);
+  function sliceTo(track, m) {
+    const a = along(track, m);
     return track.pts.slice(0, a.idx + 1).concat([a.latlng]);
   }
 
@@ -186,11 +193,15 @@
   }
 
   // ---------- state ----------
-  let state = null;   // { splits:[{name,distance}], times:[], exists:"", label, tooltip, totalLength, ratio }
-  let clockOffset = 0; // event seconds = Date.now()/1000 - clockOffset
-  let lastFetchOk = 0;
-  const layers = { route: null, done: null, splits: L.layerGroup().addTo(map), runner: null };
+  // Each runner: { pid, color, state, clockOffset, lastFetchOk, error, cid, route, marker, done, timer, stopped, ui }
+  // state: { splits:[{name,distance}], times:[], exists:"", label, tooltip, totalLength }
+  // Runners may be on different contests (routes); routes are loaded once per contest and shared.
+  const runners = new Map();
+  const routes = new Map(); // contest id -> Promise<{ track, line, splits }>
+  const COLORS = ["#ff3d7f", "#3dc8ff", "#8fe03a", "#b77bff", "#ff9f1c", "#ffffff"];
+  let focusPid = null;
   let follow = true, fittedOnce = false;
+  const DEFAULT_NOTE = "Sijainti on ajanottoon perustuva arvio, ei GPS. Päivittyy 10 s välein.";
 
   // Event clock: server "Time" is seconds of the current day; split times carry a day offset
   // (86400 per event day). Align the day using the participant's own split times.
@@ -199,12 +210,11 @@
     for (let i = 0; i < times.length; i++) if (exists[i] === "1" && times[i] > ref) ref = times[i];
     const k = Math.round((ref - serverTime) / 86400);
     const eventNow = serverTime + 86400 * k;
-    clockOffset = Date.now() / 1000 - eventNow;
+    return Date.now() / 1000 - eventNow;
   }
-  const eventNow = () => Date.now() / 1000 - clockOffset;
 
   // Same rules as RaceResult's own map worker (MarkerWait on).
-  function position(v) {
+  function position(state, v) {
     const { splits, times, exists } = state;
     const lastIdx = exists.lastIndexOf("1");
     const nextPred = times.findIndex((t, i) => exists[i] === "0" && t > v && i > lastIdx);
@@ -224,62 +234,82 @@
     return { status: "moving", dist: d, next: n };
   }
 
-  function draw() {
-    if (!track || !state) return;
-    const v = eventNow();
-    const p = position(v);
-    const { splits, times, exists } = state;
+  function drawRunner(r) {
+    if (!r.route || !r.state) return;
+    const v = Date.now() / 1000 - r.clockOffset;
+    const p = position(r.state, v);
+    const { splits, times, exists } = r.state;
     const lastIdx = exists.lastIndexOf("1");
+    const ui = r.ui;
 
     if (p.status === "hidden" || p.status === "notstarted") {
-      $("est").textContent = p.status === "notstarted" ? "Ei vielä lähtenyt" : "Ei tietoa";
-      if (layers.runner) { map.removeLayer(layers.runner); layers.runner = null; }
+      ui.est.textContent = p.status === "notstarted" ? "Ei vielä lähtenyt" : "Ei tietoa";
+      if (r.marker) { map.removeLayer(r.marker); r.marker = null; }
       return;
     }
-    const gpxM = p.dist * state.ratio;
-    const pos = along(gpxM).latlng;
+    const track = r.route.track;
+    const gpxM = p.dist * track.length / r.state.totalLength;
+    const pos = along(track, gpxM).latlng;
 
-    if (!layers.runner) {
-      layers.runner = L.marker(pos, {
-        icon: L.divIcon({ className: "", html: `<span class="bib">${escapeHtml(state.label)}</span>`, iconSize: [0, 0] }),
-        zIndexOffset: 1000, keyboard: false
+    if (!r.marker) {
+      r.marker = L.marker(pos, {
+        icon: L.divIcon({ className: "", html: `<span class="bib" style="background:${r.color};color:${r.color === "#ffffff" ? "#222" : "#fff"}">${escapeHtml(r.state.label)}</span>`, iconSize: [0, 0] }),
+        zIndexOffset: r.pid === focusPid ? 2000 : 1000, keyboard: false
       }).addTo(map);
-    } else layers.runner.setLatLng(pos);
-    if (layers.done) layers.done.setLatLngs(sliceTo(gpxM));
-    else layers.done = L.polyline(sliceTo(gpxM), { color: getVar("--done"), weight: 6, opacity: .95 }).addTo(map);
+    } else r.marker.setLatLng(pos);
+    if (r.done) r.done.setLatLngs(sliceTo(track, gpxM));
+    else r.done = L.polyline(sliceTo(track, gpxM), { color: r.color, weight: 6, opacity: .95 }).addTo(map);
 
-    if (follow && !map.getBounds().pad(-0.2).contains(pos)) map.panTo(pos, { animate: true });
+    if (follow && r.pid === focusPid && !map.getBounds().pad(-0.2).contains(pos)) map.panTo(pos, { animate: true });
 
-    const pct = Math.min(100, p.dist / state.totalLength * 100);
-    $("prog").style.width = pct.toFixed(1) + "%";
+    const pct = Math.min(100, p.dist / r.state.totalLength * 100);
+    ui.prog.style.width = pct.toFixed(1) + "%";
     const statusTxt = { moving: "", waiting: " (odottaa väliaikaa)", finished: " (maalissa)" }[p.status];
-    $("est").textContent = `${km(p.dist)} / ${km(state.totalLength)}${statusTxt}`;
-    if (lastIdx >= 0) {
-      $("last").textContent = `${splitName(splits[lastIdx].name)} klo ${clock(times[lastIdx])}`;
-    }
+    ui.est.textContent = `${km(p.dist)} / ${km(r.state.totalLength)}${statusTxt}`;
+    if (lastIdx >= 0) ui.last.textContent = `${splitName(splits[lastIdx].name)} klo ${clock(times[lastIdx])}`;
     const nextIdx = exists.indexOf("0");
     if (nextIdx !== -1) {
       const eta = times[nextIdx] - v;
-      $("next").textContent = `${splitName(splits[nextIdx].name)} (${km(splits[nextIdx].distance)}) ennuste ${clock(times[nextIdx])}` +
+      ui.next.textContent = `${splitName(splits[nextIdx].name)} (${km(splits[nextIdx].distance)}) ennuste ${clock(times[nextIdx])}` +
         (eta > 0 ? `, ${dur(eta)} päästä` : ", myöhässä ennusteesta");
-    } else $("next").textContent = "–";
+    } else ui.next.textContent = "–";
+  }
 
-    const stale = Date.now() - lastFetchOk > 60000;
-    $("note").classList.toggle("err", stale);
-    if (stale) $("note").textContent = "Tietoja ei ole saatu yli minuuttiin. Tarkista verkkoyhteys.";
+  let lastNote;
+  function draw() {
+    let msg = null;
+    for (const r of runners.values()) {
+      drawRunner(r);
+      const who = r.state?.label || r.pid;
+      if (r.error) msg ||= `Tietojen haku epäonnistui (${who}): ${r.error}. Yritetään uudelleen.`;
+      else if (Date.now() - r.lastFetchOk > 60000) msg ||= `Tietoja (${who}) ei ole saatu yli minuuttiin. Tarkista verkkoyhteys.`;
+    }
+    if (msg === lastNote) return;
+    lastNote = msg;
+    $("note").classList.toggle("err", !!msg);
+    $("note").textContent = msg || DEFAULT_NOTE;
   }
 
   // Out-and-back course: outbound and return splits share a spot, so merge splits within 120 m.
-  function drawSplits() {
-    layers.splits.clearLayers();
+  // With several runners on the same route, each passed split lists every runner's time.
+  function drawSplits(cid) {
+    const on = [...runners.values()].filter(r => r.cid === cid && r.route && r.state);
+    if (!on.length) return;
+    const { track, splits: layer } = on[0].route;
+    const splits = on[0].state.splits;
+    layer.clearLayers();
     const groups = [];
-    state.splits.forEach((s, i) => {
-      const pos = along(s.distance * state.ratio).latlng;
-      const passed = state.exists[i] === "1";
-      const line = `${escapeHtml(splitName(s.name))}${passed ? " ✓ " + clock(state.times[i]) : ""}`;
+    splits.forEach((s, i) => {
+      const pos = along(track, s.distance * track.length / on[0].state.totalLength).latlng;
+      const passedBy = on.filter(r => r.state.exists[i] === "1");
+      const passed = passedBy.length > 0;
+      const name = escapeHtml(splitName(s.name));
+      const line = on.length === 1
+        ? `${name}${passed ? " ✓ " + clock(on[0].state.times[i]) : ""}`
+        : [name, ...passedBy.map(r => `✓ ${escapeHtml(r.state.label)} ${clock(r.state.times[i])}`)].join("<br>");
       const g = groups.find(g => hav(g.pos, pos) < 120);
-      if (g) { g.lines.push(line); g.passed ||= passed; g.finish ||= i === state.splits.length - 1; }
-      else groups.push({ pos, lines: [line], passed, finish: i === state.splits.length - 1 });
+      if (g) { g.lines.push(line); g.passed ||= passed; g.finish ||= i === splits.length - 1; }
+      else groups.push({ pos, lines: [line], passed, finish: i === splits.length - 1 });
     });
     for (const g of groups) {
       L.circleMarker(g.pos, {
@@ -287,7 +317,7 @@
         fillColor: g.passed ? getVar("--done") : "#222", fillOpacity: 1
       }).bindTooltip(g.lines.join("<br>"), {
         permanent: true, direction: "top", offset: [0, -6], className: "split-label"
-      }).addTo(layers.splits);
+      }).addTo(layer);
     }
   }
 
@@ -295,21 +325,42 @@
   function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
 
   // ---------- data ----------
-  let contestId = null, liveInterval = 10;
-  let gen = 0, loopTimer = 0; // gen changes when the runner changes, so stale responses are dropped
-  async function fetchView(myGen) {
-    const url = `${server}/${EVENT}/details/view?lang=fi&mid=0&standalone=false&pid=${encodeURIComponent(PID)}`;
-    const r = await fetch(url, { cache: "no-store" });
-    if (!r.ok) throw new Error("HTTP " + r.status);
-    const j = await r.json();
-    if (myGen !== gen) return;
+  let liveInterval = 10;
+  function loadRoute(cid) {
+    if (!routes.has(cid)) {
+      routes.set(cid, (async () => {
+        const g = await fetch(`${server}/${EVENT}/details/gpx/${cid}`);
+        if (!g.ok) throw new Error("Reitin haku epäonnistui (HTTP " + g.status + ")");
+        const track = buildTrack(await g.text());
+        const line = L.polyline(track.pts, { color: getVar("--route"), weight: 4, opacity: .9 }).addTo(map);
+        line.bringToBack();
+        return { track, line, splits: L.layerGroup().addTo(map) };
+      })().catch(e => { routes.delete(cid); throw e; }));
+    }
+    return routes.get(cid);
+  }
+  // Drop routes no tracked runner is on.
+  function pruneRoutes() {
+    for (const [cid, p] of routes) {
+      if ([...runners.values()].some(r => r.cid === cid)) continue;
+      routes.delete(cid);
+      p.then(rt => { map.removeLayer(rt.line); map.removeLayer(rt.splits); }, () => {});
+    }
+  }
+
+  async function fetchView(r) {
+    const url = `${server}/${EVENT}/details/view?lang=fi&mid=0&standalone=false&pid=${encodeURIComponent(r.pid)}`;
+    const res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const j = await res.json();
+    if (r.stopped) return;
     if (j.Server) server = "https://" + j.Server;
     if (j.LiveUpdateInterval) liveInterval = Math.max(5, j.LiveUpdateInterval);
 
     const markers = j.Data?.MapDetails?.Markers || {};
     let found = null;
     for (const [cid, mk] of Object.entries(markers)) {
-      const row = mk.Participants?.Data?.[PID];
+      const row = mk.Participants?.Data?.[r.pid];
       if (row) { found = { cid, mk, row }; break; }
     }
     if (!found) throw new Error("Osallistujaa ei löytynyt karttadatasta");
@@ -321,86 +372,139 @@
     const totalLength = splits[splits.length - 1].distance;
 
     const heading = j.Elements?.find(e => e.Type === "box")?.Children?.find(c => c.Type === "field")?.Config?.Field;
-    $("name").textContent = col("Tooltips") || heading || `PID ${PID}`;
-    $("sub").textContent = heading || `NUTS HEL 2026 · ${PID}`;
-    document.title = `${col("Labels") || ""} ${col("Tooltips") || ""} · NUTS HEL`.trim();
+    r.ui.label.textContent = col("Labels") || r.pid;
+    r.ui.name.textContent = col("Tooltips") || heading || `PID ${r.pid}`;
+    r.ui.sub.textContent = heading || `NUTS HEL 2026 · ${r.pid}`;
 
     // Pace from the live splits data.
     const sp = j.Data?.SplitsAndLegs?.Splits || [];
     const lastActual = [...sp].reverse().find(s => s.Exists && s.Speed);
     const predicted = sp.find(s => !s.Exists && s.Speed);
-    $("pace").textContent = [lastActual && `${lastActual.Speed} viim. osuus`, predicted && `ennuste ${predicted.Speed}`].filter(Boolean).join(", ") || "–";
+    r.ui.pace.textContent = [lastActual && `${lastActual.Speed} viim. osuus`, predicted && `ennuste ${predicted.Speed}`].filter(Boolean).join(", ") || "–";
 
-    const changed = !state || state.exists !== exists || String(state.times) !== String(times);
-    state = { splits, times, exists, label: col("Labels") || PID, tooltip: col("Tooltips"), totalLength, ratio: track ? track.length / totalLength : 1 };
-    syncClock(j.Time, times, exists);
-    lastFetchOk = Date.now();
-    $("note").classList.remove("err");
-    $("note").textContent = "Sijainti on ajanottoon perustuva arvio, ei GPS. Päivittyy 10 s välein.";
+    const changed = !r.state || r.state.exists !== exists || String(r.state.times) !== String(times);
+    r.state = { splits, times, exists, label: col("Labels") || r.pid, tooltip: col("Tooltips"), totalLength };
+    r.clockOffset = syncClock(j.Time, times, exists);
+    r.lastFetchOk = Date.now();
+    r.error = null;
+    setTitle();
 
-    if (contestId !== found.cid) {
-      contestId = found.cid;
-      const g = await fetch(`${server}/${EVENT}/details/gpx/${contestId}`);
-      if (!g.ok) throw new Error("Reitin haku epäonnistui (HTTP " + g.status + ")");
-      const gpx = await g.text();
-      if (myGen !== gen) return;
-      track = buildTrack(gpx);
-      state.ratio = track.length / totalLength;
-      if (layers.route) map.removeLayer(layers.route);
-      layers.route = L.polyline(track.pts, { color: getVar("--route"), weight: 4, opacity: .9 }).addTo(map);
-      if (layers.done) { map.removeLayer(layers.done); layers.done = null; }
-      if (!fittedOnce) { map.fitBounds(layers.route.getBounds(), { padding: [30, 30] }); fittedOnce = true; }
-      drawSplits();
-    } else if (changed) drawSplits();
+    if (r.cid !== found.cid) {
+      const oldCid = r.cid;
+      r.cid = found.cid; r.route = null;
+      if (r.done) { map.removeLayer(r.done); r.done = null; }
+      try { r.route = await loadRoute(r.cid); } catch (e) { r.cid = null; throw e; }
+      if (r.stopped) return;
+      pruneRoutes();
+      if (oldCid) drawSplits(oldCid);
+      if (!fittedOnce) { map.fitBounds(r.route.line.getBounds(), { padding: [30, 30] }); fittedOnce = true; }
+      drawSplits(r.cid);
+    } else if (changed) drawSplits(r.cid);
     draw();
   }
 
-  async function loop() {
-    const myGen = gen;
-    try { await fetchView(myGen); }
+  async function loop(r) {
+    try { await fetchView(r); }
     catch (e) {
-      if (myGen !== gen) return;
-      $("note").classList.add("err");
-      $("note").textContent = "Tietojen haku epäonnistui: " + e.message + ". Yritetään uudelleen.";
+      if (r.stopped) return;
+      r.error = e.message;
+      draw();
     }
-    if (myGen === gen) loopTimer = setTimeout(loop, liveInterval * 1000);
+    if (!r.stopped) r.timer = setTimeout(() => loop(r), liveInterval * 1000);
   }
 
-  function stopTracking() {
-    gen++;
-    clearTimeout(loopTimer);
-    for (const k of ["runner", "done", "route"]) if (layers[k]) { map.removeLayer(layers[k]); layers[k] = null; }
-    layers.splits.clearLayers();
-    state = null; track = null; contestId = null; fittedOnce = false; lastFetchOk = Date.now();
-  }
-
-  function setUrl(pid) {
+  function setUrl() {
     try {
       const u = new URL(location.href);
       u.searchParams.delete("bib");
-      if (pid) u.searchParams.set("pid", pid); else u.searchParams.delete("pid");
+      if (runners.size) u.searchParams.set("pid", [...runners.keys()].join(",")); else u.searchParams.delete("pid");
       history.replaceState(null, "", u);
     } catch (e) { /* file:// pages may refuse URL changes */ }
   }
-
-  function startTracking(pid) {
-    stopTracking();
-    PID = String(pid);
-    setUrl(PID);
-    $("pick").hidden = true; $("view").hidden = false;
-    $("name").textContent = "Ladataan…"; $("sub").textContent = "NUTS HEL 2026";
-    for (const id of ["est", "last", "next", "pace"]) $(id).textContent = "–";
-    $("prog").style.width = "0";
-    follow = true; $("follow").setAttribute("aria-pressed", "true");
-    loop();
+  function setTitle() {
+    const rs = [...runners.values()];
+    document.title = rs.length === 1 && rs[0].state
+      ? `${rs[0].state.label} ${rs[0].state.tooltip || ""} · NUTS HEL`.trim()
+      : rs.length > 1 ? `${rs.length} juoksijaa · NUTS HEL` : "NUTS HEL Satelliittiseuranta";
   }
 
+  function setFocus(pid) {
+    focusPid = pid;
+    for (const r of runners.values()) {
+      const on = r.pid === pid;
+      r.ui.li.setAttribute("aria-current", String(on));
+      r.ui.more.hidden = !on;
+      r.marker?.setZIndexOffset(on ? 2000 : 1000);
+    }
+  }
+  function setFollow(on) { follow = on; $("follow").setAttribute("aria-pressed", String(on)); }
+
+  function addRunner(pid) {
+    pid = String(pid);
+    if (!runners.has(pid)) {
+      const used = [...runners.values()].map(r => r.color);
+      const color = COLORS.find(c => !used.includes(c)) || COLORS[runners.size % COLORS.length];
+      const li = document.createElement("li");
+      li.className = "runner";
+      li.style.setProperty("--c", color);
+      li.innerHTML = `<div class="r-head">
+          <button class="r-focus" type="button"><span class="pill"></span><span class="r-name">Ladataan…</span></button>
+          <button class="r-remove" type="button" aria-label="Lopeta seuranta">×</button>
+        </div>
+        <div class="sub">NUTS HEL 2026</div>
+        <div class="r-est">–</div>
+        <div class="bar"><div></div></div>
+        <dl class="grid" hidden>
+          <dt>Viimeksi</dt><dd>–</dd>
+          <dt>Seuraava</dt><dd>–</dd>
+          <dt>Vauhti</dt><dd>–</dd>
+        </dl>`;
+      if (color === "#ffffff") li.querySelector(".pill").style.color = "#222";
+      const dd = li.querySelectorAll("dd");
+      const r = {
+        pid, color, state: null, clockOffset: 0, lastFetchOk: Date.now(), error: null,
+        cid: null, route: null, marker: null, done: null, timer: 0, stopped: false,
+        ui: {
+          li, label: li.querySelector(".pill"), name: li.querySelector(".r-name"), sub: li.querySelector(".sub"),
+          est: li.querySelector(".r-est"), prog: li.querySelector(".bar > div"), more: li.querySelector("dl"),
+          last: dd[0], next: dd[1], pace: dd[2]
+        }
+      };
+      r.ui.label.textContent = pid;
+      li.querySelector(".r-focus").addEventListener("click", () => {
+        setFocus(pid); setFollow(true);
+        if (r.marker) map.setView(r.marker.getLatLng(), Math.max(map.getZoom(), 16));
+      });
+      li.querySelector(".r-remove").addEventListener("click", () => removeRunner(pid));
+      $("runners").append(li);
+      runners.set(pid, r);
+      loop(r);
+    }
+    setFocus(pid); setFollow(true);
+    setUrl(); setTitle();
+    showView();
+  }
+
+  function removeRunner(pid) {
+    const r = runners.get(pid);
+    if (!r) return;
+    r.stopped = true;
+    clearTimeout(r.timer);
+    for (const k of ["marker", "done"]) if (r[k]) map.removeLayer(r[k]);
+    r.ui.li.remove();
+    runners.delete(pid);
+    pruneRoutes();
+    if (r.cid) drawSplits(r.cid);
+    setUrl(); setTitle();
+    if (!runners.size) { fittedOnce = false; showPicker(); return; }
+    if (focusPid === pid) setFocus(runners.keys().next().value);
+    draw();
+  }
+
+  function showView() { $("pick").hidden = true; $("view").hidden = false; }
   function showPicker(focus) {
-    stopTracking();
-    PID = null;
-    setUrl(null);
-    document.title = "NUTS HEL Satelliittiseuranta";
     $("view").hidden = true; $("pick").hidden = false;
+    $("back").hidden = !runners.size;
     if (focus === true) $("q").focus();
   }
 
@@ -446,7 +550,7 @@
       const meta = document.createElement("span"); meta.className = "r-meta";
       meta.textContent = [splitName(row.contest), row.last].filter(Boolean).join(" · ");
       b.append(bib, nm, meta);
-      b.addEventListener("click", () => startTracking(row.pid));
+      b.addEventListener("click", () => addRunner(row.pid));
       li.append(b);
       ul.append(li);
     }
@@ -462,29 +566,33 @@
     }, 300);
   });
 
-  // ?bib=<number> in a link: look up the RaceResult id by exact bib match.
-  async function startFromBib(bib) {
+  // ?bib=<number>,... in a link: look up each RaceResult id by exact bib match.
+  async function startFromBibs(bibs) {
     showPicker();
-    $("q").value = bib;
-    $("pickNote").textContent = "Haetaan…";
-    try {
-      const rows = await search(bib);
-      const hit = rows?.find(r => String(r.bib) === String(bib));
-      if (hit) startTracking(hit.pid); else if (rows) renderResults(rows, bib);
-    } catch (e) { $("pickNote").textContent = "Haku epäonnistui: " + e.message; }
+    for (const bib of bibs) {
+      $("q").value = bib;
+      $("pickNote").textContent = "Haetaan…";
+      try {
+        const rows = await search(bib);
+        const hit = rows?.find(r => String(r.bib) === String(bib));
+        if (hit) addRunner(hit.pid); else if (rows) { showPicker(); renderResults(rows, bib); }
+      } catch (e) { $("pickNote").textContent = "Haku epäonnistui: " + e.message; }
+    }
   }
 
   $("follow").addEventListener("click", () => {
-    follow = !follow;
-    $("follow").setAttribute("aria-pressed", String(follow));
-    if (follow && layers.runner) map.setView(layers.runner.getLatLng(), Math.max(map.getZoom(), 16));
+    setFollow(!follow);
+    const m = runners.get(focusPid)?.marker;
+    if (follow && m) map.setView(m.getLatLng(), Math.max(map.getZoom(), 16));
   });
   $("fit").addEventListener("click", () => {
-    follow = false; $("follow").setAttribute("aria-pressed", "false");
-    if (layers.route) map.fitBounds(layers.route.getBounds(), { padding: [30, 30] });
+    setFollow(false);
+    const lines = [...runners.values()].filter(r => r.route).map(r => r.route.line.getBounds());
+    if (lines.length) map.fitBounds(lines.reduce((b, l) => b.extend(l)), { padding: [30, 30] });
   });
-  map.on("dragstart", () => { follow = false; $("follow").setAttribute("aria-pressed", "false"); });
-  $("change").addEventListener("click", () => showPicker(true));
+  map.on("dragstart", () => setFollow(false));
+  $("add").addEventListener("click", () => showPicker(true));
+  $("back").addEventListener("click", showView);
   $("share").addEventListener("click", async () => {
     const link = location.href;
     try { await navigator.clipboard.writeText(link); $("share").textContent = "Linkki kopioitu"; }
@@ -493,9 +601,10 @@
   });
 
   setInterval(draw, 1000);
-  const bibParam = qs.get("bib");
-  if (PID) startTracking(PID);
-  else if (bibParam) startFromBib(bibParam);
+  const list = p => (qs.get(p) || "").split(",").map(x => x.trim()).filter(Boolean);
+  const pids = list("pid"), bibs = list("bib");
+  if (pids.length) { pids.forEach(addRunner); setFocus(pids[0]); }
+  else if (bibs.length) startFromBibs(bibs);
   else showPicker();
 })();
 </script>
