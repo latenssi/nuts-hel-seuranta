@@ -91,6 +91,7 @@
   .splits th:first-child, .splits td:first-child { text-align: left; white-space: normal; padding-left: 0; }
   .splits tr.pred td { color: var(--muted); font-style: italic; }
   /* TV mode (?tv=1): read from across the room, no controls. */
+  #tvExit { position: absolute; z-index: 1100; top: 16px; right: 16px; font-size: 18px; padding: 8px 14px; background: var(--panel); }
   .tv .card { font-size: 22px; max-width: min(600px, 40vw); left: 24px; bottom: 24px; padding: 18px 22px; }
   .tv .r-focus { font-size: 26px; }
   .tv .pill { font-size: 20px; padding: 3px 10px; }
@@ -117,6 +118,7 @@
 </head>
 <body>
 <div id="map"></div>
+<button id="tvExit" type="button" hidden>Poistu TV-tilasta (Esc)</button>
 <section class="card" aria-live="polite">
 <div id="pick" hidden>
   <h1>Kenen juoksua seurataan?</h1>
@@ -152,6 +154,7 @@
   const REPLAY = (m => m ? m[1] * 3600 + m[2] * 60 + (+m[3] || 0) : null)(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(qs.get("replay") || ""));
   const SPEED = +qs.get("speed") || 1, replayT0 = Date.now();
   const TV = qs.get("tv") === "1";
+  const ZOOM = +qs.get("zoom") || null; // follow zoom level from the link, e.g. &zoom=15
   document.documentElement.classList.toggle("tv", TV);
   const replayClock = () => REPLAY + (Date.now() - replayT0) / 1000 * SPEED;
   let server = "https://my2.raceresult.com";
@@ -159,7 +162,17 @@
   const $ = id => document.getElementById(id);
 
   // ---------- map ----------
-  const map = L.map("map", { zoomControl: true, preferCanvas: false }).setView([60.1904, 24.9313], 14);
+  const map = L.map("map", {
+    zoomControl: true, preferCanvas: false,
+    // TV mode is hands-off: no dragging or zooming that would stop following.
+    ...(TV && { dragging: false, touchZoom: false, scrollWheelZoom: false, doubleClickZoom: false, boxZoom: false, keyboard: false })
+  }).setView([60.1904, 24.9313], 14);
+  const followZoom = () => ZOOM || Math.max(map.getZoom(), 16);
+  // TV: keep the runner in the middle of the map area not covered by the card.
+  function centerOn(latlng, zoom, animate) {
+    const shift = TV ? document.querySelector(".card").offsetWidth / 2 : 0;
+    map.setView(map.unproject(map.project(latlng, zoom).subtract([shift, 0]), zoom), zoom, { animate });
+  }
   const helOrto = L.tileLayer.wms("https://kartta.hel.fi/ws/geoserver/avoindata/wms", {
     layers: "avoindata:Ortoilmakuva", format: "image/jpeg", maxZoom: 20, maxNativeZoom: 19,
     attribution: 'Ilmakuva © <a href="https://kartta.hel.fi">Helsingin kaupunki</a>, <a href="https://creativecommons.org/licenses/by/4.0/deed.fi">CC BY 4.0</a>'
@@ -344,7 +357,9 @@
 
     if (follow && r.pid === focusPid) {
       // First known position of the chosen runner: zoom in like the "Seuraa" button; afterwards just keep it in view.
-      if (!r.zoomed) { r.zoomed = true; map.setView(pos, Math.max(map.getZoom(), 16)); }
+      // TV redraws 4×/s and recentres every time, so the map glides along with the runner.
+      if (TV) centerOn(pos, ZOOM || 16, false);
+      else if (!r.zoomed) { r.zoomed = true; map.setView(pos, followZoom()); }
       else if (!map.getBounds().pad(-0.2).contains(pos)) map.panTo(pos, { animate: true });
     }
 
@@ -622,7 +637,7 @@
       li.querySelector(".r-focus").addEventListener("click", () => {
         if (focusPid === pid) detailsOpen = !detailsOpen;
         setFocus(pid); setFollow(true);
-        if (r.marker) map.setView(r.marker.getLatLng(), Math.max(map.getZoom(), 16));
+        if (r.marker) map.setView(r.marker.getLatLng(), followZoom());
       });
       li.querySelector(".r-remove").addEventListener("click", () => removeRunner(pid));
       $("runners").append(li);
@@ -731,7 +746,7 @@
   $("follow").addEventListener("click", () => {
     setFollow(!follow);
     const m = runners.get(focusPid)?.marker;
-    if (follow && m) map.setView(m.getLatLng(), Math.max(map.getZoom(), 16));
+    if (follow && m) map.setView(m.getLatLng(), followZoom());
   });
   $("fit").addEventListener("click", () => {
     setFollow(false);
@@ -748,7 +763,15 @@
   }
   $("tv").addEventListener("click", () => setTv(true));
   if (TV) {
-    document.addEventListener("keydown", e => { if (e.key === "Escape") setTv(false); });
+    // Esc may never reach the page in browser fullscreen, so a mouse move or touch also reveals an exit button.
+    window.addEventListener("keydown", e => { if (e.key === "Escape") setTv(false); }, true);
+    $("tvExit").addEventListener("click", () => setTv(false));
+    let exitTimer = 0;
+    for (const t of ["mousemove", "pointerdown"]) document.addEventListener(t, () => {
+      $("tvExit").hidden = false;
+      clearTimeout(exitTimer);
+      exitTimer = setTimeout(() => { $("tvExit").hidden = true; }, 3000);
+    });
     try { navigator.wakeLock?.request("screen").catch(() => {}); } catch (e) { /* no wake lock: the screen may sleep */ }
     // Show each runner in turn: focus + zoom like the "Seuraa" button.
     setInterval(() => {
@@ -756,7 +779,6 @@
       if (shown.length < 2) return;
       const next = shown[(shown.findIndex(r => r.pid === focusPid) + 1) % shown.length];
       setFocus(next.pid); setFollow(true);
-      map.setView(next.marker.getLatLng(), Math.max(map.getZoom(), 16));
     }, 15000);
   }
   $("share").addEventListener("click", async () => {
@@ -822,7 +844,7 @@
     if (!runners.size) checkMap(); else getConfig().catch(() => {});
   });
 
-  setInterval(draw, 1000);
+  setInterval(draw, TV ? 250 : 1000);
   if (pids.length) { pids.forEach(addRunner); setFocus(pids[0]); }
   else if (bibs.length) startFromBibs(bibs);
   else showPicker();
