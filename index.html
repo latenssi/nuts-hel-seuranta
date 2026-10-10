@@ -92,7 +92,8 @@
     .card { left: 8px; right: 8px; bottom: calc(8px + env(safe-area-inset-bottom, 0px)); max-width: none; padding: 10px 12px; }
     #runners { max-height: 45vh; gap: 8px; }
     .runner .sub, #note.dflt { display: none; }
-    .leaflet-control-attribution { max-width: calc(100vw - 90px); }
+    .card .leaflet-control-attribution { color: var(--muted); font-size: 10px; line-height: 1.3; margin-top: 6px; }
+    .card .leaflet-control-attribution a { color: inherit; }
     .row button { flex: 1 1 auto; padding: 5px 6px; }
   }
   .r-focus[aria-expanded="false"] .r-name::after { content: " ▸"; color: var(--muted); }
@@ -154,15 +155,17 @@
   });
   const narrow = matchMedia("(max-width: 600px)").matches;
   helOrto.addTo(map);
-  L.control.layers(
+  const layersCtl = L.control.layers(
     { "Helsingin ilmakuva": helOrto, "Ilmakuva (koko pk-seutu)": hsyOrto, "Kartta (OSM)": osm },
     { "Tiet ja nimet": labels },
     { position: "topright", collapsed: narrow }
   ).addTo(map);
+  // On phones the open list covers its own toggle: close it after a choice or a tap on the map.
+  if (narrow) map.on("baselayerchange overlayadd overlayremove click", () => layersCtl.collapse());
   L.control.scale({ imperial: false }).addTo(map);
-  // Data credits must stay visible: on phones the card covers the bottom edge, so move them to the top.
+  // Data credits must stay visible: on phones the card covers the bottom edge, so show them in the card.
   map.attributionControl.setPrefix('Epävirallinen, ei NUTS:n eikä RaceResultin palvelu · <a href="https://leafletjs.com">Leaflet</a>');
-  if (narrow) map.attributionControl.setPosition("topleft");
+  if (narrow) document.querySelector(".card").append(map.attributionControl.getContainer());
 
   // ---------- geometry ----------
   const R = 6371008.8;
