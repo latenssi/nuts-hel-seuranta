@@ -164,14 +164,35 @@
   // ---------- map ----------
   const map = L.map("map", {
     zoomControl: true, preferCanvas: false,
+    // Lines are clipped to the view plus this margin and only re-cut after a move; TV glides far, so draw a wide margin.
+    renderer: L.svg({ padding: TV ? 1 : 0.1 }),
     // TV mode is hands-off: no dragging or zooming that would stop following.
     ...(TV && { dragging: false, touchZoom: false, scrollWheelZoom: false, doubleClickZoom: false, boxZoom: false, keyboard: false })
   }).setView([60.1904, 24.9313], 14);
   const followZoom = () => ZOOM || Math.max(map.getZoom(), 16);
-  // TV: keep the runner in the middle of the map area not covered by the card.
-  function centerOn(latlng, zoom, animate) {
-    const shift = TV ? document.querySelector(".card").offsetWidth / 2 : 0;
-    map.setView(map.unproject(map.project(latlng, zoom).subtract([shift, 0]), zoom), zoom, { animate });
+  // TV: a calm camera. The map stays still while the marker moves; when the runner nears the edge of the
+  // area not covered by the card, the map glides so the runner sits behind centre with the route ahead in view.
+  const TV_ZOOM = ZOOM || 17;
+  let tvShown = null, tvBusy = false;
+  const tvMove = fn => { tvBusy = true; map.once("moveend", () => { tvBusy = false; }); fn(); };
+  function tvFollow(r, pos, track, gpxM) {
+    const card = document.querySelector(".card").getBoundingClientRect(), size = map.getSize();
+    const x0 = card.right, w = size.x - x0;
+    const mPerPx = 40075016.686 * Math.cos(pos[0] * Math.PI / 180) / 2 ** (TV_ZOOM + 8);
+    const ahead = along(track, gpxM + w * 0.25 * mPerPx).latlng;
+    // Centre of the free area on the look-ahead point.
+    const center = map.unproject(map.project(ahead, TV_ZOOM).subtract([x0 / 2, 0]), TV_ZOOM);
+    if (tvBusy) return; // wait for the current glide or flight to finish
+    if (tvShown !== r.pid) {
+      const first = tvShown === null;
+      tvShown = r.pid;
+      if (first) map.setView(center, TV_ZOOM, { animate: false });
+      else tvMove(() => map.flyTo(center, TV_ZOOM, { duration: 2 }));
+      return;
+    }
+    const p = map.latLngToContainerPoint(pos);
+    if (p.x < x0 + w * 0.2 || p.x > size.x - w * 0.2 || p.y < size.y * 0.2 || p.y > size.y * 0.8)
+      tvMove(() => map.setView(center, TV_ZOOM, { animate: true, pan: { duration: 1.5 } }));
   }
   const helOrto = L.tileLayer.wms("https://kartta.hel.fi/ws/geoserver/avoindata/wms", {
     layers: "avoindata:Ortoilmakuva", format: "image/jpeg", maxZoom: 20, maxNativeZoom: 19,
@@ -357,8 +378,7 @@
 
     if (follow && r.pid === focusPid) {
       // First known position of the chosen runner: zoom in like the "Seuraa" button; afterwards just keep it in view.
-      // TV redraws 4×/s and recentres every time, so the map glides along with the runner.
-      if (TV) centerOn(pos, ZOOM || 16, false);
+      if (TV) tvFollow(r, pos, track, gpxM);
       else if (!r.zoomed) { r.zoomed = true; map.setView(pos, followZoom()); }
       else if (!map.getBounds().pad(-0.2).contains(pos)) map.panTo(pos, { animate: true });
     }
