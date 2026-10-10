@@ -35,7 +35,8 @@
   .bar { height: 6px; background: rgba(255,255,255,.15); border-radius: 3px; margin: 10px 0 4px; overflow: hidden; }
   .bar > div { height: 100%; width: 0; background: var(--done); transition: width .5s; }
   .note { color: var(--muted); font-size: 11px; margin-top: 8px; }
-  .row { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+  .row { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+  .row button { padding: 4px 8px; }
   button {
     font: inherit; font-size: 13px; color: var(--panel-fg); background: rgba(255,255,255,.12);
     border: 1px solid rgba(255,255,255,.25); border-radius: 6px; padding: 4px 10px; cursor: pointer;
@@ -89,9 +90,12 @@
   .splits tr.pred td { color: var(--muted); font-style: italic; }
   @media (max-width: 600px) {
     .card { left: 8px; right: 8px; bottom: calc(8px + env(safe-area-inset-bottom, 0px)); max-width: none; padding: 10px 12px; }
-    #runners { max-height: 38vh; }
-    .row button { flex: 1; }
+    #runners { max-height: 45vh; gap: 8px; }
+    .runner .sub, #note.dflt { display: none; }
+    .row button { flex: 1 1 auto; padding: 5px 6px; }
   }
+  .r-focus[aria-expanded="false"] .r-name::after { content: " ▸"; color: var(--muted); }
+  .r-focus[aria-expanded="true"] .r-name::after { content: " ▾"; color: var(--muted); }
   .splits tr.cur td { background: color-mix(in srgb, var(--c) 30%, transparent); }
 </style>
 </head>
@@ -109,14 +113,12 @@
 <div id="view" hidden>
   <ul id="runners"></ul>
   <div class="row">
-    <button id="follow" type="button" aria-pressed="true">Seuraa valittua</button>
+    <button id="follow" type="button" aria-pressed="true">Seuraa</button>
     <button id="fit" type="button">Koko reitti</button>
+    <button id="add" type="button">+ Juoksija</button>
+    <button id="share" type="button">Jaa linkki</button>
   </div>
-  <div class="row">
-    <button id="add" type="button">Lisää juoksija</button>
-    <button id="share" type="button">Kopioi linkki</button>
-  </div>
-  <div class="note" id="note">Sijainti on ajanottoon perustuva arvio, ei GPS. Päivittyy 10 s välein.</div>
+  <div class="note dflt" id="note">Sijainti on ajanottoon perustuva arvio, ei GPS. Päivittyy 10 s välein.</div>
 </div>
 </section>
 <script>
@@ -319,6 +321,7 @@
     if (msg === lastNote) return;
     lastNote = msg;
     $("note").classList.toggle("err", !!msg);
+    $("note").classList.toggle("dflt", !msg);
     $("note").textContent = msg || DEFAULT_NOTE;
   }
 
@@ -461,12 +464,16 @@
       : rs.length > 1 ? `${rs.length} juoksijaa · NUTS HEL` : "NUTS HEL Satelliittiseuranta";
   }
 
+  // Details of the focused runner; collapsed by default on phones to keep the map visible.
+  let detailsOpen = !matchMedia("(max-width: 600px)").matches;
   function setFocus(pid) {
     focusPid = pid;
     for (const r of runners.values()) {
       const on = r.pid === pid;
       r.ui.li.setAttribute("aria-current", String(on));
-      r.ui.more.hidden = !on;
+      r.ui.more.hidden = !(on && detailsOpen);
+      const btn = r.ui.li.querySelector(".r-focus");
+      if (on) btn.setAttribute("aria-expanded", String(detailsOpen)); else btn.removeAttribute("aria-expanded");
       r.marker?.setZIndexOffset(on ? 2000 : 1000);
     }
   }
@@ -511,6 +518,7 @@
       };
       r.ui.label.textContent = pid;
       li.querySelector(".r-focus").addEventListener("click", () => {
+        if (focusPid === pid) detailsOpen = !detailsOpen;
         setFocus(pid); setFollow(true);
         if (r.marker) map.setView(r.marker.getLatLng(), Math.max(map.getZoom(), 16));
       });
@@ -634,9 +642,9 @@
   $("back").addEventListener("click", showView);
   $("share").addEventListener("click", async () => {
     const link = location.href;
-    try { await navigator.clipboard.writeText(link); $("share").textContent = "Linkki kopioitu"; }
-    catch (e) { $("note").textContent = "Kopioi linkki osoiteriviltä: " + link; }
-    setTimeout(() => { $("share").textContent = "Kopioi linkki"; }, 2500);
+    try { await navigator.clipboard.writeText(link); $("share").textContent = "Kopioitu"; }
+    catch (e) { $("note").classList.remove("dflt"); $("note").textContent = "Kopioi linkki osoiteriviltä: " + link; }
+    setTimeout(() => { $("share").textContent = "Jaa linkki"; }, 2500);
   });
 
   setInterval(draw, 1000);
