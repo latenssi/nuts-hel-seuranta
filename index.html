@@ -159,6 +159,14 @@
   });
   const narrow = matchMedia("(max-width: 600px)").matches;
   helOrto.addTo(map);
+  // Helsinki and HSY aerial imagery only cover the capital region; elsewhere (e.g. NUTS Pyhä) start on OSM.
+  const HEL_AREA = L.latLngBounds([60.0, 24.76], [60.33, 25.29]), HSY_AREA = L.latLngBounds([59.95, 24.5], [60.42, 25.3]);
+  function pickBase(b) {
+    const base = HEL_AREA.contains(b) ? helOrto : HSY_AREA.contains(b) ? hsyOrto : osm;
+    if (map.hasLayer(base)) return;
+    for (const l of [helOrto, hsyOrto, osm]) map.removeLayer(l);
+    base.addTo(map);
+  }
   const layersCtl = L.control.layers(
     { "Helsingin ilmakuva": helOrto, "Ilmakuva (koko pk-seutu)": hsyOrto, "Kartta (OSM)": osm },
     { "Tiet ja nimet": labels },
@@ -395,11 +403,23 @@
   function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
 
   // ---------- data ----------
-  let liveInterval = 10;
+  let liveInterval = 10, eventName = "NUTS HEL", cfgPromise = null;
+  // Per-event settings differ (list name, details page, server): read them like RaceResult's own page does.
+  function getConfig() {
+    return cfgPromise ||= (async () => {
+      const r = await fetch(`https://my.raceresult.com/${EVENT}/live/config?lang=fi`);
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const c = await r.json();
+      const list = (c.TabConfig?.Lists || []).find(l => !l.Mode);
+      if (c.server) server = "https://" + c.server;
+      if (c.eventname) { eventName = c.eventname; setTitle(); }
+      return { key: c.key, list: list?.Name || "Online|Live", details: list?.Details || c.TabConfig?.StandardDetails || "details" };
+    })().catch(e => { cfgPromise = null; throw e; });
+  }
   function loadRoute(cid) {
     if (!routes.has(cid)) {
       routes.set(cid, (async () => {
-        const g = await fetch(`${server}/${EVENT}/details/gpx/${cid}`);
+        const g = await fetch(`${server}/${EVENT}/${(await getConfig()).details}/gpx/${cid}`);
         if (!g.ok) throw new Error("Reitin haku epäonnistui (HTTP " + g.status + ")");
         const track = buildTrack(await g.text());
         const line = L.polyline(track.pts, { color: getVar("--route"), weight: 4, opacity: .9 }).addTo(map);
@@ -419,7 +439,8 @@
   }
 
   async function fetchView(r) {
-    const url = `${server}/${EVENT}/details/view?lang=fi&mid=${r.mid}&standalone=false&pid=${encodeURIComponent(r.pid)}`;
+    const cfg = await getConfig();
+    const url = `${server}/${EVENT}/${cfg.details}/view?lang=fi&mid=${r.mid}&standalone=false&pid=${encodeURIComponent(r.pid)}`;
     const res = await fetch(url, { cache: "no-store" });
     if (!res.ok) throw new Error("HTTP " + res.status);
     const j = await res.json();
@@ -436,7 +457,14 @@
       const row = mk.Participants?.Data?.[r.pid];
       if (row) { found = { cid, mk, row }; break; }
     }
-    if (!found) throw new Error("Osallistujaa ei löytynyt karttadatasta");
+    const heading = j.Elements?.find(e => e.Type === "box")?.Children?.find(c => c.Type === "field")?.Config?.Field;
+    if (!found) { // the organiser has no map (GPX + split positions) for this distance or event: nothing to track
+      r.ui.name.textContent = heading || `PID ${r.pid}`;
+      r.ui.label.textContent = /Bib (\d+)/.exec(heading || "")?.[1] || r.pid;
+      r.ui.est.textContent = Object.keys(j.Data?.MapDetails || {}).length ? "Tälle matkalle ei ole karttaseurantaa." : "Tapahtumassa ei ole karttaseurantaa.";
+      r.live = false; r.error = null; r.lastFetchOk = Date.now();
+      return;
+    }
     const cols = found.mk.Participants.Columns;
     const col = name => found.row[cols.indexOf(name)];
     const splits = found.mk.Splits.map(s => ({ name: s.Name, distance: s.Distance }));
@@ -444,10 +472,9 @@
     const exists = col("SplitsExists") || "";
     const totalLength = splits[splits.length - 1].distance;
 
-    const heading = j.Elements?.find(e => e.Type === "box")?.Children?.find(c => c.Type === "field")?.Config?.Field;
     r.ui.label.textContent = col("Labels") || r.pid;
     r.ui.name.textContent = col("Tooltips") || heading || `PID ${r.pid}`;
-    r.ui.sub.textContent = heading || `NUTS HEL 2026 · ${r.pid}`;
+    r.ui.sub.textContent = heading || `${eventName} · ${r.pid}`;
 
     // Pace from the live splits data.
     const sp = j.Data?.SplitsAndLegs?.Splits || [];
@@ -472,7 +499,7 @@
       if (r.stopped) return;
       pruneRoutes();
       if (oldCid) drawSplits(oldCid);
-      if (!fittedOnce) { map.fitBounds(r.route.line.getBounds(), { padding: [30, 30] }); fittedOnce = true; }
+      if (!fittedOnce) { pickBase(r.route.line.getBounds()); map.fitBounds(r.route.line.getBounds(), { padding: [30, 30] }); fittedOnce = true; }
       drawSplits(r.cid);
     } else if (changed) drawSplits(r.cid);
     r.mid = j.MID || 0; // only after a full, successful update
@@ -507,8 +534,8 @@
   function setTitle() {
     const rs = [...runners.values()];
     document.title = rs.length === 1 && rs[0].state
-      ? `${rs[0].state.label} ${rs[0].state.tooltip || ""} · NUTS HEL`.trim()
-      : rs.length > 1 ? `${rs.length} juoksijaa · NUTS HEL` : "NUTS HEL Satelliittiseuranta";
+      ? `${rs[0].state.label} ${rs[0].state.tooltip || ""} · ${eventName}`.trim()
+      : rs.length > 1 ? `${rs.length} juoksijaa · ${eventName}` : `${eventName} Satelliittiseuranta`;
   }
 
   // Details of the focused runner; collapsed by default on phones to keep the map visible.
@@ -538,7 +565,7 @@
           <button class="r-focus" type="button"><span class="pill"></span><span class="r-name">Ladataan…</span></button>
           <button class="r-remove" type="button" aria-label="Lopeta seuranta">×</button>
         </div>
-        <div class="sub">NUTS HEL 2026</div>
+        <div class="sub"></div>
         <div class="r-est">–</div>
         <div class="bar"><div></div></div>
         <div class="r-more" hidden>
@@ -604,18 +631,16 @@
   }
 
   // ---------- runner search (RaceResult live list) ----------
-  let listKey = null, searchSeq = 0, searchTimer = 0;
-  async function getKey() {
-    if (listKey) return listKey;
-    const r = await fetch(`https://my.raceresult.com/${EVENT}/live/config?lang=fi`);
-    if (!r.ok) throw new Error("HTTP " + r.status);
-    listKey = (await r.json()).key;
-    return listKey;
-  }
-  // Rows look like [bib, pid, rank, name, ..., distanceKm, "Split kello hh:mm:ss", ...], nested under contest groups.
+  let searchSeq = 0, searchTimer = 0;
+  // Rows look like [bib, pid, rank, ..., name, ..., "Split kello hh:mm:ss", ...], nested under contest groups.
+  // Column order varies by event, so take the first plain-text column as the name and the first "text + time" as last split.
+  const plainText = c => typeof c === "string" && c && !/^[{\[]/.test(c) && !/^[\d.,:]+$/.test(c);
   function collectRows(node, contest, out) {
     if (Array.isArray(node)) {
-      for (const r of node) if (Array.isArray(r) && r.length > 4) out.push({ bib: r[0], pid: r[1], name: r[3], last: r[8] || "", contest });
+      for (const r of node) if (Array.isArray(r) && r.length > 4) {
+        const rest = r.slice(3);
+        out.push({ bib: r[0], pid: r[1], name: rest.find(plainText) || "", last: rest.find(c => /\D.*\d+:\d\d:\d\d/.test(c)) || "", contest });
+      }
     } else if (node && typeof node === "object") {
       for (const [k, v] of Object.entries(node)) collectRows(v, contest ?? k.replace(/^#\d+_/, ""), out);
     }
@@ -623,8 +648,8 @@
   }
   async function search(term) {
     const seq = ++searchSeq;
-    const key = await getKey();
-    const url = `${server}/${EVENT}/live/list?key=${key}&listname=${encodeURIComponent("Online|Live")}&page=live&contest=0&r=search&l=30&term=${encodeURIComponent(term)}`;
+    const cfg = await getConfig();
+    const url = `${server}/${EVENT}/live/list?key=${cfg.key}&listname=${encodeURIComponent(cfg.list)}&page=live&contest=0&r=search&l=30&term=${encodeURIComponent(term)}`;
     const r = await fetch(url, { cache: "no-store" });
     if (!r.ok) throw new Error("HTTP " + r.status);
     const rows = collectRows((await r.json()).data, null, []);
@@ -701,6 +726,7 @@
   if (pids.length) { pids.forEach(addRunner); setFocus(pids[0]); }
   else if (bibs.length) startFromBibs(bibs);
   else showPicker();
+  getConfig().catch(() => {}); // event name for the title; search and tracking retry on their own
 })();
 </script>
 </body>
