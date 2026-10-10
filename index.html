@@ -1,0 +1,503 @@
+<!doctype html>
+<html lang="fi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>NUTS HEL Satelliittiseuranta</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  /* Full-screen map, one floating status card bottom-left. */
+  :root {
+    --panel: rgba(18, 24, 20, 0.86);
+    --panel-fg: #eef3ec;
+    --muted: #a9b8ab;
+    --route: #ffd23f;
+    --done: #ff6b3d;
+    --runner: #ff3d7f;
+    --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  html, body { height: 100%; margin: 0; background: #1b211d; font-family: var(--font); }
+  #map { position: absolute; inset: 0; }
+  .card {
+    position: absolute; z-index: 1000; left: 12px; bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+    max-width: min(360px, calc(100vw - 24px)); box-sizing: border-box;
+    background: var(--panel); color: var(--panel-fg); border-radius: 10px;
+    padding: 12px 14px; backdrop-filter: blur(6px); box-shadow: 0 4px 18px rgba(0,0,0,.35);
+    font-size: 14px; line-height: 1.4;
+  }
+  .card h1 { font-size: 16px; margin: 0 0 2px; text-wrap: balance; }
+  .card .sub { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
+  .grid { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; font-variant-numeric: tabular-nums; }
+  .grid dt { color: var(--muted); }
+  .grid dd { margin: 0; }
+  .bar { height: 6px; background: rgba(255,255,255,.15); border-radius: 3px; margin: 10px 0 4px; overflow: hidden; }
+  .bar > div { height: 100%; width: 0; background: var(--done); transition: width .5s; }
+  .note { color: var(--muted); font-size: 11px; margin-top: 8px; }
+  .row { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+  button {
+    font: inherit; font-size: 13px; color: var(--panel-fg); background: rgba(255,255,255,.12);
+    border: 1px solid rgba(255,255,255,.25); border-radius: 6px; padding: 4px 10px; cursor: pointer;
+  }
+  button[aria-pressed="true"] { background: var(--done); border-color: var(--done); color: #fff; }
+  button:focus-visible { outline: 2px solid var(--route); outline-offset: 2px; }
+  .err { color: #ffb4a8; }
+  .bib {
+    background: var(--runner); color: #fff; font: 700 12px/1 var(--font); padding: 4px 7px;
+    border: 2px solid #fff; border-radius: 12px; white-space: nowrap; box-shadow: 0 1px 6px rgba(0,0,0,.5);
+    transform: translate(-50%, -50%); display: inline-block;
+  }
+  .split-label {
+    background: rgba(255,255,255,.9); color: #222; font: 600 11px/1.2 var(--font);
+    padding: 2px 5px; border-radius: 4px; white-space: nowrap;
+  }
+  .leaflet-tooltip.split-label { border: 0; box-shadow: 0 1px 4px rgba(0,0,0,.4); }
+  #q {
+    width: 100%; box-sizing: border-box; font: inherit; font-size: 16px; color: var(--panel-fg);
+    background: rgba(255,255,255,.1); border: 1px solid rgba(255,255,255,.3); border-radius: 6px; padding: 7px 10px;
+  }
+  #q:focus-visible { outline: 2px solid var(--route); outline-offset: 1px; }
+  #results { list-style: none; margin: 8px 0 0; padding: 0; max-height: 40vh; overflow-y: auto; display: grid; gap: 4px; }
+  #results button {
+    width: 100%; text-align: left; display: grid; grid-template-columns: 3.2em 1fr; gap: 2px 8px; padding: 6px 8px;
+  }
+  #results .r-bib { font-weight: 700; font-variant-numeric: tabular-nums; grid-row: span 2; align-self: center; }
+  #results .r-meta { color: var(--muted); font-size: 12px; min-width: 0; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<section class="card" aria-live="polite">
+<div id="pick" hidden>
+  <h1>Kenen juoksua seurataan?</h1>
+  <label class="sub" for="q" style="display:block">Hae nimellä tai numerolla</label>
+  <input id="q" type="search" autocomplete="off" enterkeyhint="search" placeholder="esim. Virtanen tai 168">
+  <ul id="results"></ul>
+  <div class="note" id="pickNote">Haku löytää matkaan lähteneet juoksijat.</div>
+</div>
+<div id="view" hidden>
+  <h1 id="name">Ladataan…</h1>
+  <div class="sub" id="sub">NUTS HEL 2026</div>
+  <dl class="grid">
+    <dt>Arvio nyt</dt><dd id="est">–</dd>
+    <dt>Viimeksi</dt><dd id="last">–</dd>
+    <dt>Seuraava</dt><dd id="next">–</dd>
+    <dt>Vauhti</dt><dd id="pace">–</dd>
+  </dl>
+  <div class="bar"><div id="prog"></div></div>
+  <div class="row">
+    <button id="follow" type="button" aria-pressed="true">Seuraa juoksijaa</button>
+    <button id="fit" type="button">Koko reitti</button>
+  </div>
+  <div class="row">
+    <button id="share" type="button">Kopioi linkki</button>
+    <button id="change" type="button">Vaihda juoksijaa</button>
+  </div>
+  <div class="note" id="note">Sijainti on ajanottoon perustuva arvio, ei GPS. Päivittyy 10 s välein.</div>
+</div>
+</section>
+<script>
+(() => {
+  // Runner is chosen by search, or by ?pid=<RaceResult id> / ?bib=<number> in the link.
+  const qs = new URLSearchParams(location.search);
+  const EVENT = qs.get("event") || "371720";
+  let PID = qs.get("pid");
+  let server = "https://my2.raceresult.com";
+
+  const $ = id => document.getElementById(id);
+
+  // ---------- map ----------
+  const map = L.map("map", { zoomControl: true, preferCanvas: false }).setView([60.1904, 24.9313], 14);
+  const helOrto = L.tileLayer.wms("https://kartta.hel.fi/ws/geoserver/avoindata/wms", {
+    layers: "avoindata:Ortoilmakuva", format: "image/jpeg", maxZoom: 20, maxNativeZoom: 19,
+    attribution: 'Ilmakuva © <a href="https://kartta.hel.fi">Helsingin kaupunki</a>'
+  });
+  const esri = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
+    maxZoom: 20, maxNativeZoom: 19, attribution: "Imagery © Esri, Maxar, Earthstar Geographics"
+  });
+  const osm = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 20, maxNativeZoom: 19, attribution: "© OpenStreetMap"
+  });
+  const labels = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}", {
+    maxZoom: 20, maxNativeZoom: 19, opacity: 0.7
+  });
+  helOrto.addTo(map);
+  L.control.layers(
+    { "Helsingin ilmakuva": helOrto, "Esri satelliitti": esri, "Kartta (OSM)": osm },
+    { "Tiet ja nimet": labels },
+    { position: "topright", collapsed: false }
+  ).addTo(map);
+  L.control.scale({ imperial: false }).addTo(map);
+
+  // ---------- geometry ----------
+  const R = 6371008.8;
+  function hav(a, b) {
+    const toRad = Math.PI / 180;
+    const dLat = (b[0] - a[0]) * toRad, dLon = (b[1] - a[1]) * toRad;
+    const s = Math.sin(dLat / 2) ** 2 + Math.cos(a[0] * toRad) * Math.cos(b[0] * toRad) * Math.sin(dLon / 2) ** 2;
+    return 2 * R * Math.asin(Math.sqrt(s));
+  }
+  let track = null; // { pts: [[lat,lon]], cum: [m], length }
+  function buildTrack(gpxText) {
+    const doc = new DOMParser().parseFromString(gpxText, "text/xml");
+    let nodes = doc.getElementsByTagName("rtept");
+    if (!nodes.length) nodes = doc.getElementsByTagName("trkpt");
+    const pts = [];
+    for (const n of nodes) {
+      const p = [parseFloat(n.getAttribute("lat")), parseFloat(n.getAttribute("lon"))];
+      const prev = pts[pts.length - 1];
+      if (!prev || prev[0] !== p[0] || prev[1] !== p[1]) pts.push(p);
+    }
+    const cum = [0];
+    for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + hav(pts[i - 1], pts[i]));
+    return { pts, cum, length: cum[cum.length - 1] };
+  }
+  // Point and slice along the track by metres on the GPX line.
+  function along(m) {
+    const { pts, cum } = track;
+    m = Math.max(0, Math.min(m, track.length));
+    let lo = 0, hi = cum.length - 1;
+    while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (cum[mid] <= m) lo = mid; else hi = mid; }
+    const seg = cum[hi] - cum[lo], t = seg > 0 ? (m - cum[lo]) / seg : 0;
+    return { latlng: [pts[lo][0] + (pts[hi][0] - pts[lo][0]) * t, pts[lo][1] + (pts[hi][1] - pts[lo][1]) * t], idx: lo };
+  }
+  function sliceTo(m) {
+    const a = along(m);
+    return track.pts.slice(0, a.idx + 1).concat([a.latlng]);
+  }
+
+  // ---------- formatting ----------
+  const pad = n => String(n).padStart(2, "0");
+  function clock(sec) { // event seconds -> HH:MM:SS of day
+    const s = ((Math.round(sec) % 86400) + 86400) % 86400;
+    return `${pad(Math.floor(s / 3600))}:${pad(Math.floor(s / 60) % 60)}:${pad(s % 60)}`;
+  }
+  function dur(sec) {
+    sec = Math.max(0, Math.round(sec));
+    const h = Math.floor(sec / 3600), m = Math.floor(sec / 60) % 60, s = sec % 60;
+    return h ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+  }
+  const km = m => (m / 1000).toLocaleString("fi-FI", { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + " km";
+  function splitName(raw) { // "{EN:Start|FI:Lähtö}" -> "Lähtö"
+    const m = /^\{(.*)\}$/.exec(raw || "");
+    if (!m) return raw;
+    const parts = Object.fromEntries(m[1].split("|").map(p => [p.slice(0, p.indexOf(":")), p.slice(p.indexOf(":") + 1)]));
+    return parts.FI || parts.EN || Object.values(parts)[0];
+  }
+
+  // ---------- state ----------
+  let state = null;   // { splits:[{name,distance}], times:[], exists:"", label, tooltip, totalLength, ratio }
+  let clockOffset = 0; // event seconds = Date.now()/1000 - clockOffset
+  let lastFetchOk = 0;
+  const layers = { route: null, done: null, splits: L.layerGroup().addTo(map), runner: null };
+  let follow = true, fittedOnce = false;
+
+  // Event clock: server "Time" is seconds of the current day; split times carry a day offset
+  // (86400 per event day). Align the day using the participant's own split times.
+  function syncClock(serverTime, times, exists) {
+    let ref = times[0];
+    for (let i = 0; i < times.length; i++) if (exists[i] === "1" && times[i] > ref) ref = times[i];
+    const k = Math.round((ref - serverTime) / 86400);
+    const eventNow = serverTime + 86400 * k;
+    clockOffset = Date.now() / 1000 - eventNow;
+  }
+  const eventNow = () => Date.now() / 1000 - clockOffset;
+
+  // Same rules as RaceResult's own map worker (MarkerWait on).
+  function position(v) {
+    const { splits, times, exists } = state;
+    const lastIdx = exists.lastIndexOf("1");
+    const nextPred = times.findIndex((t, i) => exists[i] === "0" && t > v && i > lastIdx);
+    let wait = -1;
+    if (lastIdx !== -1) {
+      const s = splits.findIndex((_, i) => i > lastIdx);
+      if (s !== -1 && (nextPred === -1 || s < nextPred)) wait = s;
+    }
+    if (times.every(t => t === 0)) return { status: "hidden" };
+    if (exists[exists.length - 1] === "1") return { status: "finished", dist: state.totalLength };
+    if (wait === -1 && nextPred === -1) return { status: "finished", dist: state.totalLength };
+    if (wait > 0) return { status: "waiting", dist: splits[wait].distance, at: wait };
+    if (nextPred === -1 || nextPred === 0) return { status: "notstarted" };
+    const n = nextPred;
+    if (times[n] <= times[n - 1]) return { status: "waiting", dist: splits[n - 1].distance, at: n - 1 };
+    const d = splits[n - 1].distance + (splits[n].distance - splits[n - 1].distance) / (times[n] - times[n - 1]) * Math.max(v - times[n - 1], 0);
+    return { status: "moving", dist: d, next: n };
+  }
+
+  function draw() {
+    if (!track || !state) return;
+    const v = eventNow();
+    const p = position(v);
+    const { splits, times, exists } = state;
+    const lastIdx = exists.lastIndexOf("1");
+
+    if (p.status === "hidden" || p.status === "notstarted") {
+      $("est").textContent = p.status === "notstarted" ? "Ei vielä lähtenyt" : "Ei tietoa";
+      if (layers.runner) { map.removeLayer(layers.runner); layers.runner = null; }
+      return;
+    }
+    const gpxM = p.dist * state.ratio;
+    const pos = along(gpxM).latlng;
+
+    if (!layers.runner) {
+      layers.runner = L.marker(pos, {
+        icon: L.divIcon({ className: "", html: `<span class="bib">${escapeHtml(state.label)}</span>`, iconSize: [0, 0] }),
+        zIndexOffset: 1000, keyboard: false
+      }).addTo(map);
+    } else layers.runner.setLatLng(pos);
+    if (layers.done) layers.done.setLatLngs(sliceTo(gpxM));
+    else layers.done = L.polyline(sliceTo(gpxM), { color: getVar("--done"), weight: 6, opacity: .95 }).addTo(map);
+
+    if (follow && !map.getBounds().pad(-0.2).contains(pos)) map.panTo(pos, { animate: true });
+
+    const pct = Math.min(100, p.dist / state.totalLength * 100);
+    $("prog").style.width = pct.toFixed(1) + "%";
+    const statusTxt = { moving: "", waiting: " (odottaa väliaikaa)", finished: " (maalissa)" }[p.status];
+    $("est").textContent = `${km(p.dist)} / ${km(state.totalLength)}${statusTxt}`;
+    if (lastIdx >= 0) {
+      $("last").textContent = `${splitName(splits[lastIdx].name)} klo ${clock(times[lastIdx])}`;
+    }
+    const nextIdx = exists.indexOf("0");
+    if (nextIdx !== -1) {
+      const eta = times[nextIdx] - v;
+      $("next").textContent = `${splitName(splits[nextIdx].name)} (${km(splits[nextIdx].distance)}) ennuste ${clock(times[nextIdx])}` +
+        (eta > 0 ? `, ${dur(eta)} päästä` : ", myöhässä ennusteesta");
+    } else $("next").textContent = "–";
+
+    const stale = Date.now() - lastFetchOk > 60000;
+    $("note").classList.toggle("err", stale);
+    if (stale) $("note").textContent = "Tietoja ei ole saatu yli minuuttiin. Tarkista verkkoyhteys.";
+  }
+
+  // Out-and-back course: outbound and return splits share a spot, so merge splits within 120 m.
+  function drawSplits() {
+    layers.splits.clearLayers();
+    const groups = [];
+    state.splits.forEach((s, i) => {
+      const pos = along(s.distance * state.ratio).latlng;
+      const passed = state.exists[i] === "1";
+      const line = `${escapeHtml(splitName(s.name))}${passed ? " ✓ " + clock(state.times[i]) : ""}`;
+      const g = groups.find(g => hav(g.pos, pos) < 120);
+      if (g) { g.lines.push(line); g.passed ||= passed; g.finish ||= i === state.splits.length - 1; }
+      else groups.push({ pos, lines: [line], passed, finish: i === state.splits.length - 1 });
+    });
+    for (const g of groups) {
+      L.circleMarker(g.pos, {
+        radius: g.finish ? 7 : 5, color: "#fff", weight: 2,
+        fillColor: g.passed ? getVar("--done") : "#222", fillOpacity: 1
+      }).bindTooltip(g.lines.join("<br>"), {
+        permanent: true, direction: "top", offset: [0, -6], className: "split-label"
+      }).addTo(layers.splits);
+    }
+  }
+
+  function getVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+  function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+
+  // ---------- data ----------
+  let contestId = null, liveInterval = 10;
+  let gen = 0, loopTimer = 0; // gen changes when the runner changes, so stale responses are dropped
+  async function fetchView(myGen) {
+    const url = `${server}/${EVENT}/details/view?lang=fi&mid=0&standalone=false&pid=${encodeURIComponent(PID)}`;
+    const r = await fetch(url, { cache: "no-store" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const j = await r.json();
+    if (myGen !== gen) return;
+    if (j.Server) server = "https://" + j.Server;
+    if (j.LiveUpdateInterval) liveInterval = Math.max(5, j.LiveUpdateInterval);
+
+    const markers = j.Data?.MapDetails?.Markers || {};
+    let found = null;
+    for (const [cid, mk] of Object.entries(markers)) {
+      const row = mk.Participants?.Data?.[PID];
+      if (row) { found = { cid, mk, row }; break; }
+    }
+    if (!found) throw new Error("Osallistujaa ei löytynyt karttadatasta");
+    const cols = found.mk.Participants.Columns;
+    const col = name => found.row[cols.indexOf(name)];
+    const splits = found.mk.Splits.map(s => ({ name: s.Name, distance: s.Distance }));
+    const times = col("SplitsTime");
+    const exists = col("SplitsExists") || "";
+    const totalLength = splits[splits.length - 1].distance;
+
+    const heading = j.Elements?.find(e => e.Type === "box")?.Children?.find(c => c.Type === "field")?.Config?.Field;
+    $("name").textContent = col("Tooltips") || heading || `PID ${PID}`;
+    $("sub").textContent = heading || `NUTS HEL 2026 · ${PID}`;
+    document.title = `${col("Labels") || ""} ${col("Tooltips") || ""} · NUTS HEL`.trim();
+
+    // Pace from the live splits data.
+    const sp = j.Data?.SplitsAndLegs?.Splits || [];
+    const lastActual = [...sp].reverse().find(s => s.Exists && s.Speed);
+    const predicted = sp.find(s => !s.Exists && s.Speed);
+    $("pace").textContent = [lastActual && `${lastActual.Speed} viim. osuus`, predicted && `ennuste ${predicted.Speed}`].filter(Boolean).join(", ") || "–";
+
+    const changed = !state || state.exists !== exists || String(state.times) !== String(times);
+    state = { splits, times, exists, label: col("Labels") || PID, tooltip: col("Tooltips"), totalLength, ratio: track ? track.length / totalLength : 1 };
+    syncClock(j.Time, times, exists);
+    lastFetchOk = Date.now();
+    $("note").classList.remove("err");
+    $("note").textContent = "Sijainti on ajanottoon perustuva arvio, ei GPS. Päivittyy 10 s välein.";
+
+    if (contestId !== found.cid) {
+      contestId = found.cid;
+      const g = await fetch(`${server}/${EVENT}/details/gpx/${contestId}`);
+      if (!g.ok) throw new Error("Reitin haku epäonnistui (HTTP " + g.status + ")");
+      const gpx = await g.text();
+      if (myGen !== gen) return;
+      track = buildTrack(gpx);
+      state.ratio = track.length / totalLength;
+      if (layers.route) map.removeLayer(layers.route);
+      layers.route = L.polyline(track.pts, { color: getVar("--route"), weight: 4, opacity: .9 }).addTo(map);
+      if (layers.done) { map.removeLayer(layers.done); layers.done = null; }
+      if (!fittedOnce) { map.fitBounds(layers.route.getBounds(), { padding: [30, 30] }); fittedOnce = true; }
+      drawSplits();
+    } else if (changed) drawSplits();
+    draw();
+  }
+
+  async function loop() {
+    const myGen = gen;
+    try { await fetchView(myGen); }
+    catch (e) {
+      if (myGen !== gen) return;
+      $("note").classList.add("err");
+      $("note").textContent = "Tietojen haku epäonnistui: " + e.message + ". Yritetään uudelleen.";
+    }
+    if (myGen === gen) loopTimer = setTimeout(loop, liveInterval * 1000);
+  }
+
+  function stopTracking() {
+    gen++;
+    clearTimeout(loopTimer);
+    for (const k of ["runner", "done", "route"]) if (layers[k]) { map.removeLayer(layers[k]); layers[k] = null; }
+    layers.splits.clearLayers();
+    state = null; track = null; contestId = null; fittedOnce = false; lastFetchOk = Date.now();
+  }
+
+  function setUrl(pid) {
+    try {
+      const u = new URL(location.href);
+      u.searchParams.delete("bib");
+      if (pid) u.searchParams.set("pid", pid); else u.searchParams.delete("pid");
+      history.replaceState(null, "", u);
+    } catch (e) { /* file:// pages may refuse URL changes */ }
+  }
+
+  function startTracking(pid) {
+    stopTracking();
+    PID = String(pid);
+    setUrl(PID);
+    $("pick").hidden = true; $("view").hidden = false;
+    $("name").textContent = "Ladataan…"; $("sub").textContent = "NUTS HEL 2026";
+    for (const id of ["est", "last", "next", "pace"]) $(id).textContent = "–";
+    $("prog").style.width = "0";
+    follow = true; $("follow").setAttribute("aria-pressed", "true");
+    loop();
+  }
+
+  function showPicker(focus) {
+    stopTracking();
+    PID = null;
+    setUrl(null);
+    document.title = "NUTS HEL Satelliittiseuranta";
+    $("view").hidden = true; $("pick").hidden = false;
+    if (focus === true) $("q").focus();
+  }
+
+  // ---------- runner search (RaceResult live list) ----------
+  let listKey = null, searchSeq = 0, searchTimer = 0;
+  async function getKey() {
+    if (listKey) return listKey;
+    const r = await fetch(`https://my.raceresult.com/${EVENT}/live/config?lang=fi`);
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    listKey = (await r.json()).key;
+    return listKey;
+  }
+  // Rows look like [bib, pid, rank, name, ..., distanceKm, "Split kello hh:mm:ss", ...], nested under contest groups.
+  function collectRows(node, contest, out) {
+    if (Array.isArray(node)) {
+      for (const r of node) if (Array.isArray(r) && r.length > 4) out.push({ bib: r[0], pid: r[1], name: r[3], last: r[8] || "", contest });
+    } else if (node && typeof node === "object") {
+      for (const [k, v] of Object.entries(node)) collectRows(v, contest ?? k.replace(/^#\d+_/, ""), out);
+    }
+    return out;
+  }
+  async function search(term) {
+    const seq = ++searchSeq;
+    const key = await getKey();
+    const url = `${server}/${EVENT}/live/list?key=${key}&listname=${encodeURIComponent("Online|Live")}&page=live&contest=0&r=search&l=30&term=${encodeURIComponent(term)}`;
+    const r = await fetch(url, { cache: "no-store" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const rows = collectRows((await r.json()).data, null, []);
+    if (seq !== searchSeq) return null;
+    return rows;
+  }
+  function renderResults(rows, term) {
+    const ul = $("results");
+    ul.replaceChildren();
+    if (!rows.length) { $("pickNote").textContent = `Ei osumia haulla "${term}". Haku löytää vain matkaan lähteneet.`; return; }
+    $("pickNote").textContent = rows.length >= 30 ? "Näytetään 30 ensimmäistä. Tarkenna hakua." : "Valitse juoksija.";
+    for (const row of rows) {
+      const li = document.createElement("li");
+      const b = document.createElement("button");
+      b.type = "button";
+      const bib = document.createElement("span"); bib.className = "r-bib"; bib.textContent = row.bib;
+      const nm = document.createElement("span"); nm.textContent = row.name;
+      const meta = document.createElement("span"); meta.className = "r-meta";
+      meta.textContent = [splitName(row.contest), row.last].filter(Boolean).join(" · ");
+      b.append(bib, nm, meta);
+      b.addEventListener("click", () => startTracking(row.pid));
+      li.append(b);
+      ul.append(li);
+    }
+  }
+  $("q").addEventListener("input", () => {
+    clearTimeout(searchTimer);
+    const term = $("q").value.trim();
+    if (term.length < (/^\d+$/.test(term) ? 1 : 2)) { $("results").replaceChildren(); $("pickNote").textContent = "Haku löytää matkaan lähteneet juoksijat."; return; }
+    searchTimer = setTimeout(async () => {
+      $("pickNote").textContent = "Haetaan…";
+      try { const rows = await search(term); if (rows) renderResults(rows, term); }
+      catch (e) { $("pickNote").textContent = "Haku epäonnistui: " + e.message; }
+    }, 300);
+  });
+
+  // ?bib=<number> in a link: look up the RaceResult id by exact bib match.
+  async function startFromBib(bib) {
+    showPicker();
+    $("q").value = bib;
+    $("pickNote").textContent = "Haetaan…";
+    try {
+      const rows = await search(bib);
+      const hit = rows?.find(r => String(r.bib) === String(bib));
+      if (hit) startTracking(hit.pid); else if (rows) renderResults(rows, bib);
+    } catch (e) { $("pickNote").textContent = "Haku epäonnistui: " + e.message; }
+  }
+
+  $("follow").addEventListener("click", () => {
+    follow = !follow;
+    $("follow").setAttribute("aria-pressed", String(follow));
+    if (follow && layers.runner) map.setView(layers.runner.getLatLng(), Math.max(map.getZoom(), 16));
+  });
+  $("fit").addEventListener("click", () => {
+    follow = false; $("follow").setAttribute("aria-pressed", "false");
+    if (layers.route) map.fitBounds(layers.route.getBounds(), { padding: [30, 30] });
+  });
+  map.on("dragstart", () => { follow = false; $("follow").setAttribute("aria-pressed", "false"); });
+  $("change").addEventListener("click", () => showPicker(true));
+  $("share").addEventListener("click", async () => {
+    const link = location.href;
+    try { await navigator.clipboard.writeText(link); $("share").textContent = "Linkki kopioitu"; }
+    catch (e) { $("note").textContent = "Kopioi linkki osoiteriviltä: " + link; }
+    setTimeout(() => { $("share").textContent = "Kopioi linkki"; }, 2500);
+  });
+
+  setInterval(draw, 1000);
+  const bibParam = qs.get("bib");
+  if (PID) startTracking(PID);
+  else if (bibParam) startFromBib(bibParam);
+  else showPicker();
+})();
+</script>
+</body>
+</html>
