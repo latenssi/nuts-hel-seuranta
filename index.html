@@ -92,6 +92,7 @@
     .card { left: 8px; right: 8px; bottom: calc(8px + env(safe-area-inset-bottom, 0px)); max-width: none; padding: 10px 12px; }
     #runners { max-height: 45vh; gap: 8px; }
     .runner .sub, #note.dflt { display: none; }
+    .leaflet-control-attribution { max-width: calc(100vw - 90px); }
     .row button { flex: 1 1 auto; padding: 5px 6px; }
   }
   .r-focus[aria-expanded="false"] .r-name::after { content: " ▸"; color: var(--muted); }
@@ -134,24 +135,28 @@
   const map = L.map("map", { zoomControl: true, preferCanvas: false }).setView([60.1904, 24.9313], 14);
   const helOrto = L.tileLayer.wms("https://kartta.hel.fi/ws/geoserver/avoindata/wms", {
     layers: "avoindata:Ortoilmakuva", format: "image/jpeg", maxZoom: 20, maxNativeZoom: 19,
-    attribution: 'Ilmakuva © <a href="https://kartta.hel.fi">Helsingin kaupunki</a>'
+    attribution: 'Ilmakuva © <a href="https://kartta.hel.fi">Helsingin kaupunki</a>, <a href="https://creativecommons.org/licenses/by/4.0/deed.fi">CC BY 4.0</a>'
   });
   const esri = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
     maxZoom: 20, maxNativeZoom: 19, attribution: "Imagery © Esri, Maxar, Earthstar Geographics"
   });
   const osm = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    maxZoom: 20, maxNativeZoom: 19, attribution: "© OpenStreetMap"
+    maxZoom: 20, maxNativeZoom: 19, attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap contributors</a>'
   });
   const labels = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}", {
     maxZoom: 20, maxNativeZoom: 19, opacity: 0.7
   });
+  const narrow = matchMedia("(max-width: 600px)").matches;
   helOrto.addTo(map);
   L.control.layers(
     { "Helsingin ilmakuva": helOrto, "Esri satelliitti": esri, "Kartta (OSM)": osm },
     { "Tiet ja nimet": labels },
-    { position: "topright", collapsed: matchMedia("(max-width: 600px)").matches }
+    { position: "topright", collapsed: narrow }
   ).addTo(map);
   L.control.scale({ imperial: false }).addTo(map);
+  // Data credits must stay visible: on phones the card covers the bottom edge, so move them to the top.
+  map.attributionControl.setPrefix('Epävirallinen, ei NUTS:n eikä RaceResultin palvelu · <a href="https://leafletjs.com">Leaflet</a>');
+  if (narrow) map.attributionControl.setPosition("topleft");
 
   // ---------- geometry ----------
   const R = 6371008.8;
