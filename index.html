@@ -319,6 +319,12 @@
     const statusTxt = { moving: "", waiting: " (odottaa väliaikaa)", finished: " (maalissa)" }[p.status];
     ui.est.textContent = `${km(p.dist)} / ${km(r.state.totalLength)}${statusTxt}`;
     if (lastIdx >= 0) ui.last.textContent = `${splitName(splits[lastIdx].name)} klo ${clock(times[lastIdx])}`;
+    // Average pace from the start to the last split passed (whole course once finished).
+    if (lastIdx > 0 && splits[lastIdx].distance > 0) {
+      const s = Math.round((times[lastIdx] - times[0]) / splits[lastIdx].distance * 1000);
+      ui.avg.textContent = `${Math.floor(s / 60)}:${pad(s % 60)} min/km` +
+        (lastIdx === splits.length - 1 ? " (koko matka)" : ` (${km(splits[lastIdx].distance)} asti)`);
+    }
     const nextIdx = exists.indexOf("0");
     if (nextIdx !== -1) {
       const eta = times[nextIdx] - v;
@@ -540,6 +546,7 @@
           <dt>Viimeksi</dt><dd>–</dd>
           <dt>Seuraava</dt><dd>–</dd>
           <dt>Vauhti</dt><dd>–</dd>
+          <dt>Keskivauhti</dt><dd>–</dd>
         </dl>
         <details class="splits"><summary>Väliajat</summary><div class="tbl"><table>
           <thead><tr><th>Piste</th><th>Klo</th><th>Aika</th><th>min/km</th><th>Sija</th></tr></thead>
@@ -554,7 +561,7 @@
         ui: {
           li, label: li.querySelector(".pill"), name: li.querySelector(".r-name"), sub: li.querySelector(".sub"),
           est: li.querySelector(".r-est"), prog: li.querySelector(".bar > div"), more: li.querySelector(".r-more"), splits: li.querySelector("tbody"),
-          last: dd[0], next: dd[1], pace: dd[2]
+          last: dd[0], next: dd[1], pace: dd[2], avg: dd[3]
         }
       };
       r.ui.label.textContent = pid;
