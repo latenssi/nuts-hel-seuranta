@@ -65,7 +65,9 @@
   #results .r-bib { font-weight: 700; font-variant-numeric: tabular-nums; grid-row: span 2; align-self: center; }
   #results .r-meta { color: var(--muted); font-size: 12px; min-width: 0; }
   #runners { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; max-height: 45vh; overflow-y: auto; }
-  .runner { border-left: 3px solid var(--c); padding-left: 8px; }
+  .runner { border-left: 3px solid var(--c); padding-left: 8px; min-width: 0; }
+  .card { color-scheme: dark; }
+  .grid dd { min-width: 0; overflow-wrap: anywhere; }
   .r-head { display: flex; gap: 6px; align-items: center; }
   .r-focus {
     flex: 1; min-width: 0; display: flex; gap: 8px; align-items: center; text-align: left;
@@ -78,6 +80,19 @@
   .runner .bar { margin: 5px 0 2px; }
   .runner .bar > div { background: var(--c); }
   .runner .grid { margin-top: 6px; }
+  .splits summary { cursor: pointer; color: var(--muted); font-size: 12px; margin-top: 8px; }
+  .splits .tbl { overflow-x: auto; }
+  .splits table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; margin-top: 4px; }
+  .splits th { color: var(--muted); font-weight: 400; text-align: right; padding: 2px 4px; }
+  .splits td { text-align: right; padding: 2px 4px; white-space: nowrap; }
+  .splits th:first-child, .splits td:first-child { text-align: left; white-space: normal; padding-left: 0; }
+  .splits tr.pred td { color: var(--muted); font-style: italic; }
+  @media (max-width: 600px) {
+    .card { left: 8px; right: 8px; bottom: calc(8px + env(safe-area-inset-bottom, 0px)); max-width: none; padding: 10px 12px; }
+    #runners { max-height: 38vh; }
+    .row button { flex: 1; }
+  }
+  .splits tr.cur td { background: color-mix(in srgb, var(--c) 30%, transparent); }
 </style>
 </head>
 <body>
@@ -132,7 +147,7 @@
   L.control.layers(
     { "Helsingin ilmakuva": helOrto, "Esri satelliitti": esri, "Kartta (OSM)": osm },
     { "Tiet ja nimet": labels },
-    { position: "topright", collapsed: false }
+    { position: "topright", collapsed: matchMedia("(max-width: 600px)").matches }
   ).addTo(map);
   L.control.scale({ imperial: false }).addTo(map);
 
@@ -232,6 +247,23 @@
     if (times[n] <= times[n - 1]) return { status: "waiting", dist: splits[n - 1].distance, at: n - 1 };
     const d = splits[n - 1].distance + (splits[n].distance - splits[n - 1].distance) / (times[n] - times[n - 1]) * Math.max(v - times[n - 1], 0);
     return { status: "moving", dist: d, next: n };
+  }
+
+  // Rows from SplitsAndLegs: TOD "1:10:51:56" (day:clock), Chip = from start line.
+  function renderSplitTable(tbody, sp) {
+    const cur = sp.map(s => s.Exists).lastIndexOf(true);
+    tbody.replaceChildren(...sp.map((s, i) => {
+      const tr = document.createElement("tr");
+      tr.className = !s.Exists ? "pred" : i === cur ? "cur" : "";
+      for (const v of [
+        splitName(s.Name),
+        (s.TOD || "").replace(/^\d+:(?=\d+:\d+:\d+$)/, ""),
+        s.IsStart ? "" : s.Chip || s.Gun || "",
+        (s.Speed || "").replace(" min/km", ""),
+        s.RO > 0 ? s.RO : ""
+      ]) { const td = document.createElement("td"); td.textContent = v; tr.append(td); }
+      return tr;
+    }));
   }
 
   function drawRunner(r) {
@@ -381,6 +413,7 @@
     const lastActual = [...sp].reverse().find(s => s.Exists && s.Speed);
     const predicted = sp.find(s => !s.Exists && s.Speed);
     r.ui.pace.textContent = [lastActual && `${lastActual.Speed} viim. osuus`, predicted && `ennuste ${predicted.Speed}`].filter(Boolean).join(", ") || "–";
+    renderSplitTable(r.ui.splits, sp.filter(s => !s.Internal));
 
     const changed = !r.state || r.state.exists !== exists || String(r.state.times) !== String(times);
     r.state = { splits, times, exists, label: col("Labels") || r.pid, tooltip: col("Tooltips"), totalLength };
@@ -454,11 +487,17 @@
         <div class="sub">NUTS HEL 2026</div>
         <div class="r-est">–</div>
         <div class="bar"><div></div></div>
-        <dl class="grid" hidden>
+        <div class="r-more" hidden>
+        <dl class="grid">
           <dt>Viimeksi</dt><dd>–</dd>
           <dt>Seuraava</dt><dd>–</dd>
           <dt>Vauhti</dt><dd>–</dd>
-        </dl>`;
+        </dl>
+        <details class="splits"><summary>Väliajat</summary><div class="tbl"><table>
+          <thead><tr><th>Piste</th><th>Klo</th><th>Aika</th><th>min/km</th><th>Sija</th></tr></thead>
+          <tbody></tbody>
+        </table></div><div class="note">Kursiivilla ennuste.</div></details>
+        </div>`;
       if (color === "#ffffff") li.querySelector(".pill").style.color = "#222";
       const dd = li.querySelectorAll("dd");
       const r = {
@@ -466,7 +505,7 @@
         cid: null, route: null, marker: null, done: null, timer: 0, stopped: false,
         ui: {
           li, label: li.querySelector(".pill"), name: li.querySelector(".r-name"), sub: li.querySelector(".sub"),
-          est: li.querySelector(".r-est"), prog: li.querySelector(".bar > div"), more: li.querySelector("dl"),
+          est: li.querySelector(".r-est"), prog: li.querySelector(".bar > div"), more: li.querySelector(".r-more"), splits: li.querySelector("tbody"),
           last: dd[0], next: dd[1], pace: dd[2]
         }
       };
