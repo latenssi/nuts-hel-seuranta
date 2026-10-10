@@ -54,11 +54,13 @@
     padding: 2px 5px; border-radius: 4px; white-space: nowrap;
   }
   .leaflet-tooltip.split-label { border: 0; box-shadow: 0 1px 4px rgba(0,0,0,.4); }
-  #q {
+  #event { margin-bottom: 10px; }
+  #q, #event {
     width: 100%; box-sizing: border-box; font: inherit; font-size: 16px; color: var(--panel-fg);
     background: rgba(255,255,255,.1); border: 1px solid rgba(255,255,255,.3); border-radius: 6px; padding: 7px 10px;
   }
-  #q:focus-visible { outline: 2px solid var(--route); outline-offset: 1px; }
+  #event option, #event optgroup { color: #222; }
+  #q:focus-visible, #event:focus-visible { outline: 2px solid var(--route); outline-offset: 1px; }
   #results { list-style: none; margin: 8px 0 0; padding: 0; max-height: 40vh; overflow-y: auto; display: grid; gap: 4px; }
   #results button {
     width: 100%; text-align: left; display: grid; grid-template-columns: 3.2em 1fr; gap: 2px 8px; padding: 6px 8px;
@@ -106,6 +108,8 @@
 <section class="card" aria-live="polite">
 <div id="pick" hidden>
   <h1>Kenen juoksua seurataan?</h1>
+  <label class="sub" for="event" style="display:block">Tapahtuma</label>
+  <select id="event"><option>Ladataan…</option></select>
   <label class="sub" for="q" style="display:block">Hae nimellä tai numerolla</label>
   <input id="q" type="search" autocomplete="off" enterkeyhint="search" placeholder="esim. Virtanen tai 168">
   <ul id="results"></ul>
@@ -127,7 +131,10 @@
 (() => {
   // Runners are chosen by search, or by ?pid=<RaceResult id>,... / ?bib=<number>,... in the link.
   const qs = new URLSearchParams(location.search);
-  const EVENT = qs.get("event") || "371720";
+  const list = p => (qs.get(p) || "").split(",").map(x => x.trim()).filter(Boolean);
+  const pids = list("pid"), bibs = list("bib");
+  // Links from before the event picker carry no event; they were all NUTS HEL 2026.
+  let EVENT = qs.get("event") || (pids.length || bibs.length ? "371720" : null);
   // Replay of a past race: ?replay=HH:MM[:SS]&speed=N runs an event clock from that time of day, using actual split times.
   const REPLAY = (m => m ? m[1] * 3600 + m[2] * 60 + (+m[3] || 0) : null)(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(qs.get("replay") || ""));
   const SPEED = +qs.get("speed") || 1, replayT0 = Date.now();
@@ -527,6 +534,7 @@
     try {
       const u = new URL(location.href);
       u.searchParams.delete("bib");
+      if (EVENT) u.searchParams.set("event", EVENT);
       if (runners.size) u.searchParams.set("pid", [...runners.keys()].join(",")); else u.searchParams.delete("pid");
       history.replaceState(null, "", u);
     } catch (e) { /* file:// pages may refuse URL changes */ }
@@ -648,6 +656,7 @@
   }
   async function search(term) {
     const seq = ++searchSeq;
+    await eventsReady;
     const cfg = await getConfig();
     const url = `${server}/${EVENT}/live/list?key=${cfg.key}&listname=${encodeURIComponent(cfg.list)}&page=live&contest=0&r=search&l=30&term=${encodeURIComponent(term)}`;
     const r = await fetch(url, { cache: "no-store" });
@@ -678,7 +687,7 @@
   $("q").addEventListener("input", () => {
     clearTimeout(searchTimer);
     const term = $("q").value.trim();
-    if (term.length < (/^\d+$/.test(term) ? 1 : 2)) { $("results").replaceChildren(); $("pickNote").textContent = "Haku löytää matkaan lähteneet juoksijat."; return; }
+    if (term.length < (/^\d+$/.test(term) ? 1 : 2)) { $("results").replaceChildren(); $("pickNote").textContent = pickHint; return; }
     searchTimer = setTimeout(async () => {
       $("pickNote").textContent = "Haetaan…";
       try { const rows = await search(term); if (rows) renderResults(rows, term); }
@@ -720,13 +729,66 @@
     setTimeout(() => { $("share").textContent = "Jaa linkki"; }, 2500);
   });
 
+  // ---------- event picker (RaceResult's own event search) ----------
+  let pickHint = "Haku löytää matkaan lähteneet juoksijat.";
+  async function loadEvents() {
+    const r = await fetch("https://my.raceresult.com/RREvents/list?filter=NUTS&country=FI&modes=last,next&limit=200&lang=fi");
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return (await r.json()).flatMap(g => g.Events)
+      .filter(e => /\bNUTS\b/i.test(e.name)) // the filter also matches "Donuts", "Knutsford"…
+      .sort((a, b) => b.dateFrom.localeCompare(a.dateFrom));
+  }
+  function fillEvents(evs) {
+    if (!evs.some(e => String(e.id) === EVENT)) evs = [{ id: EVENT, name: eventName, dateFrom: "" }, ...evs];
+    const today = new Date().toISOString().slice(0, 10), groups = new Map();
+    for (const e of evs) {
+      const y = e.dateFrom.slice(0, 4) || "Muu";
+      if (!groups.has(y)) groups.set(y, Object.assign(document.createElement("optgroup"), { label: y }));
+      const d = e.dateFrom ? ` · ${+e.dateFrom.slice(8, 10)}.${+e.dateFrom.slice(5, 7)}.${y}` : "";
+      groups.get(y).append(new Option(e.name.trim() + d + (e.dateFrom > today ? " (tuleva)" : ""), e.id));
+    }
+    $("event").replaceChildren(...groups.values());
+    $("event").value = EVENT;
+  }
+  // One probe per event so the picker can tell up front when the organiser has no map tracking.
+  async function checkMap() {
+    const ev = EVENT;
+    pickHint = "Haku löytää matkaan lähteneet juoksijat.";
+    $("pickNote").textContent = pickHint;
+    try {
+      const cfg = await getConfig();
+      const r = await fetch(`${server}/${ev}/live/list?key=${cfg.key}&listname=${encodeURIComponent(cfg.list)}&page=live&contest=0&r=search&l=1&term=a`);
+      const row = r.ok && collectRows((await r.json()).data, null, [])[0];
+      if (!row) return;
+      const v = await (await fetch(`${server}/${ev}/${cfg.details}/view?lang=fi&mid=0&standalone=false&pid=${row.pid}`)).json();
+      if (ev !== EVENT || Object.keys(v.Data?.MapDetails || {}).length) return;
+      pickHint = "Tässä tapahtumassa ei ole karttaseurantaa: juoksijat löytyvät, mutta sijaintia ei voi näyttää.";
+      if (!$("results").children.length) $("pickNote").textContent = pickHint;
+    } catch (e) { /* only a hint; search reports real errors */ }
+  }
+  function setEvent(id) {
+    for (const pid of [...runners.keys()]) removeRunner(pid);
+    EVENT = String(id); cfgPromise = null; fittedOnce = false;
+    $("q").value = ""; $("results").replaceChildren();
+    setUrl(); setTitle();
+    checkMap();
+  }
+  $("event").addEventListener("change", () => {
+    if (runners.size && !confirm("Tapahtuman vaihto lopettaa nykyisten juoksijoiden seurannan. Jatketaanko?")) { $("event").value = EVENT; return; }
+    setEvent($("event").value);
+  });
+  // Default event: the latest NUTS event that has already started.
+  const eventsReady = loadEvents().catch(() => []).then(evs => {
+    const today = new Date().toISOString().slice(0, 10);
+    EVENT ||= String(evs.find(e => e.dateFrom <= today)?.id || "371720");
+    fillEvents(evs);
+    if (!runners.size) checkMap(); else getConfig().catch(() => {});
+  });
+
   setInterval(draw, 1000);
-  const list = p => (qs.get(p) || "").split(",").map(x => x.trim()).filter(Boolean);
-  const pids = list("pid"), bibs = list("bib");
   if (pids.length) { pids.forEach(addRunner); setFocus(pids[0]); }
   else if (bibs.length) startFromBibs(bibs);
   else showPicker();
-  getConfig().catch(() => {}); // event name for the title; search and tracking retry on their own
 })();
 </script>
 </body>
