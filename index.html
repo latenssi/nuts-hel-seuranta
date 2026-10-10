@@ -327,7 +327,11 @@
     if (r.done) r.done.setLatLngs(sliceTo(track, gpxM));
     else r.done = L.polyline(sliceTo(track, gpxM), { color: r.color, weight: 6, opacity: .95 }).addTo(map);
 
-    if (follow && r.pid === focusPid && !map.getBounds().pad(-0.2).contains(pos)) map.panTo(pos, { animate: true });
+    if (follow && r.pid === focusPid) {
+      // First known position of the chosen runner: zoom in like the "Seuraa" button; afterwards just keep it in view.
+      if (!r.zoomed) { r.zoomed = true; map.setView(pos, Math.max(map.getZoom(), 16)); }
+      else if (!map.getBounds().pad(-0.2).contains(pos)) map.panTo(pos, { animate: true });
+    }
 
     const pct = Math.min(100, p.dist / r.state.totalLength * 100);
     ui.prog.style.width = pct.toFixed(1) + "%";
@@ -506,7 +510,7 @@
       if (r.stopped) return;
       pruneRoutes();
       if (oldCid) drawSplits(oldCid);
-      if (!fittedOnce) { pickBase(r.route.line.getBounds()); map.fitBounds(r.route.line.getBounds(), { padding: [30, 30] }); fittedOnce = true; }
+      if (!fittedOnce) { pickBase(r.route.line.getBounds()); map.fitBounds(r.route.line.getBounds(), { padding: [30, 30], animate: false }); fittedOnce = true; }
       drawSplits(r.cid);
     } else if (changed) drawSplits(r.cid);
     r.mid = j.MID || 0; // only after a full, successful update
