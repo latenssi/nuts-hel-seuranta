@@ -128,6 +128,10 @@
   // Runners are chosen by search, or by ?pid=<RaceResult id>,... / ?bib=<number>,... in the link.
   const qs = new URLSearchParams(location.search);
   const EVENT = qs.get("event") || "371720";
+  // Replay of a past race: ?replay=HH:MM[:SS]&speed=N runs an event clock from that time of day, using actual split times.
+  const REPLAY = (m => m ? m[1] * 3600 + m[2] * 60 + (+m[3] || 0) : null)(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(qs.get("replay") || ""));
+  const SPEED = +qs.get("speed") || 1, replayT0 = Date.now();
+  const replayClock = () => REPLAY + (Date.now() - replayT0) / 1000 * SPEED;
   let server = "https://my2.raceresult.com";
 
   const $ = id => document.getElementById(id);
@@ -284,7 +288,7 @@
 
   function drawRunner(r) {
     if (!r.route || !r.state) return;
-    const v = Date.now() / 1000 - r.clockOffset;
+    const v = eventNow(r);
     const p = position(r.state, v);
     const { splits, times, exists } = r.state;
     const lastIdx = exists.lastIndexOf("1");
@@ -323,20 +327,31 @@
     } else ui.next.textContent = "–";
   }
 
+  const eventNow = r => REPLAY === null ? Date.now() / 1000 - r.clockOffset : r.day * 86400 + replayClock();
+  // In replay, a split counts as passed only once the replay clock reaches its actual time.
+  function replayMask(r) {
+    if (!r.state) return;
+    const v = eventNow(r);
+    const ex = r.state.times.map(t => t > 0 && t <= v ? "1" : "0").join("");
+    if (ex !== r.state.exists) { r.state.exists = ex; drawSplits(r.cid); }
+  }
+
   let lastNote;
   function draw() {
     let msg = null;
     for (const r of runners.values()) {
+      if (REPLAY !== null) replayMask(r);
       drawRunner(r);
       const who = r.state?.label || r.pid;
       if (r.error) msg ||= `Tietojen haku epäonnistui (${who}): ${r.error}. Yritetään uudelleen.`;
       else if (r.live && !r.paused && Date.now() - r.lastFetchOk > 60000) msg ||= `Tietoja (${who}) ei ole saatu yli minuuttiin. Tarkista verkkoyhteys.`;
     }
-    if (msg === lastNote) return;
-    lastNote = msg;
+    const text = msg || (REPLAY === null ? DEFAULT_NOTE : `Toisto ${SPEED}× · klo ${clock(replayClock())}`);
+    if (text === lastNote) return;
+    lastNote = text;
     $("note").classList.toggle("err", !!msg);
-    $("note").classList.toggle("dflt", !msg);
-    $("note").textContent = msg || DEFAULT_NOTE;
+    $("note").classList.toggle("dflt", !msg && REPLAY === null);
+    $("note").textContent = text;
   }
 
   // Out-and-back course: outbound and return splits share a spot, so merge splits within 120 m.
@@ -438,6 +453,7 @@
     const changed = !r.state || r.state.exists !== exists || String(r.state.times) !== String(times);
     r.state = { splits, times, exists, label: col("Labels") || r.pid, tooltip: col("Tooltips"), totalLength };
     r.clockOffset = syncClock(j.Time, times, exists);
+    r.day = Math.floor(times[0] / 86400);
     r.lastFetchOk = Date.now();
     r.error = null;
     setTitle();
