@@ -22,7 +22,7 @@
   #map { position: absolute; inset: 0; }
   .card {
     position: absolute; z-index: 1000; left: 12px; bottom: calc(24px + env(safe-area-inset-bottom, 0px));
-    max-width: min(360px, calc(100vw - 24px)); box-sizing: border-box;
+    max-width: min(400px, calc(100vw - 24px)); box-sizing: border-box;
     background: var(--panel); color: var(--panel-fg); border-radius: 10px;
     padding: 12px 14px; backdrop-filter: blur(6px); box-shadow: 0 4px 18px rgba(0,0,0,.35);
     font-size: 14px; line-height: 1.4;
@@ -90,7 +90,19 @@
   .splits td { text-align: right; padding: 2px 4px; white-space: nowrap; }
   .splits th:first-child, .splits td:first-child { text-align: left; white-space: normal; padding-left: 0; }
   .splits tr.pred td { color: var(--muted); font-style: italic; }
+  /* TV mode (?tv=1): read from across the room, no controls. */
+  .tv .card { font-size: 22px; max-width: min(600px, 40vw); left: 24px; bottom: 24px; padding: 18px 22px; }
+  .tv .r-focus { font-size: 26px; }
+  .tv .pill { font-size: 20px; padding: 3px 10px; }
+  .tv .card .sub { font-size: 16px; }
+  .tv .note { font-size: 15px; }
+  .tv #runners { max-height: 75vh; gap: 16px; }
+  .tv .bar { height: 10px; }
+  .tv .bib { font-size: 20px; padding: 6px 11px; border-width: 3px; }
+  .tv .leaflet-tooltip.split-label { font-size: 16px; }
+  .tv #view .row, .tv .r-remove, .tv .splits, .tv .leaflet-control-zoom, .tv .leaflet-control-layers, .tv .r-focus .r-name::after { display: none; }
   @media (max-width: 600px) {
+    #tv { display: none; }
     .card { left: 8px; right: 8px; bottom: calc(8px + env(safe-area-inset-bottom, 0px)); max-width: none; padding: 10px 12px; }
     #runners { max-height: 45vh; gap: 8px; }
     .runner .sub, #note.dflt { display: none; }
@@ -123,6 +135,7 @@
     <button id="fit" type="button">Koko reitti</button>
     <button id="add" type="button">+ Juoksija</button>
     <button id="share" type="button">Jaa linkki</button>
+    <button id="tv" type="button" title="Isot tekstit, ei nappeja, vaihtaa juoksijaa automaattisesti. Esc palaa." aria-label="TV-tila">TV</button>
   </div>
   <div class="note dflt" id="note">Sijainti on ajanottoon perustuva arvio, ei GPS. Päivittyy 10 s välein.</div>
 </div>
@@ -138,6 +151,8 @@
   // Replay of a past race: ?replay=HH:MM[:SS]&speed=N runs an event clock from that time of day, using actual split times.
   const REPLAY = (m => m ? m[1] * 3600 + m[2] * 60 + (+m[3] || 0) : null)(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(qs.get("replay") || ""));
   const SPEED = +qs.get("speed") || 1, replayT0 = Date.now();
+  const TV = qs.get("tv") === "1";
+  document.documentElement.classList.toggle("tv", TV);
   const replayClock = () => REPLAY + (Date.now() - replayT0) / 1000 * SPEED;
   let server = "https://my2.raceresult.com";
 
@@ -520,7 +535,7 @@
   // No polling while the tab is hidden; visibilitychange resumes it.
   async function loop(r) {
     r.timer = 0;
-    if (document.hidden) { r.paused = true; return; }
+    if (document.hidden && !TV) { r.paused = true; return; } // a cast tab in TV mode may sit in the background
     try { await fetchView(r); }
     catch (e) {
       if (r.stopped) return;
@@ -726,6 +741,24 @@
   map.on("dragstart", () => setFollow(false));
   $("add").addEventListener("click", () => showPicker(true));
   $("back").addEventListener("click", showView);
+  function setTv(on) {
+    const u = new URL(location.href);
+    if (on) u.searchParams.set("tv", "1"); else u.searchParams.delete("tv");
+    location.href = u;
+  }
+  $("tv").addEventListener("click", () => setTv(true));
+  if (TV) {
+    document.addEventListener("keydown", e => { if (e.key === "Escape") setTv(false); });
+    try { navigator.wakeLock?.request("screen").catch(() => {}); } catch (e) { /* no wake lock: the screen may sleep */ }
+    // Show each runner in turn: focus + zoom like the "Seuraa" button.
+    setInterval(() => {
+      const shown = [...runners.values()].filter(r => r.marker);
+      if (shown.length < 2) return;
+      const next = shown[(shown.findIndex(r => r.pid === focusPid) + 1) % shown.length];
+      setFocus(next.pid); setFollow(true);
+      map.setView(next.marker.getLatLng(), Math.max(map.getZoom(), 16));
+    }, 15000);
+  }
   $("share").addEventListener("click", async () => {
     const link = location.href;
     try { await navigator.clipboard.writeText(link); $("share").textContent = "Kopioitu"; }
