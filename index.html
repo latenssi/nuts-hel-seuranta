@@ -379,6 +379,8 @@
 
     const pct = Math.min(100, p.dist / r.state.totalLength * 100);
     ui.prog.style.width = pct.toFixed(1) + "%";
+    // Finished: sink to the bottom of the list so runners still out there stay on top.
+    if (p.status === "finished" && !r.sunk) { r.sunk = true; $("runners").append(ui.li); }
     const statusTxt = { moving: "", late: " (arvio, väliaika viipyy)", waiting: " (odottaa väliaikaa)", finished: " (maalissa)" }[p.status];
     ui.est.textContent = p.status === "finished" // final time from the start mat to the finish
       ? `Maalissa: ${km(r.state.totalLength)} ajassa ${dur(times[times.length - 1] - times[0])}`
@@ -584,6 +586,7 @@
     const changed = !r.state || r.state.exists !== exists || String(r.state.times) !== String(times);
     r.state = { splits, times, exists, label: col("Labels") || r.pid, tooltip: col("Tooltips"), totalLength };
     r.clockOffset = syncClock(j.Time, times, exists);
+    if (exists.endsWith("1")) r.live = false; // finish time is in: nothing more to fetch
     r.day = Math.floor(times[0] / 86400);
     r.lastFetchOk = Date.now();
     r.error = null;
@@ -848,9 +851,13 @@
         rotateAt = Date.now() + 15000;
         return;
       }
-      if (shown.length < 2 || Date.now() < rotateAt) return;
+      // Finished runners drop out of the rotation (unless everyone has finished).
+      const out = shown.filter(r => r.state.exists[r.state.exists.length - 1] !== "1");
+      const turn = out.length ? out : shown;
+      if (Date.now() < rotateAt && turn.some(r => r.pid === focusPid)) return;
       rotateAt = Date.now() + 15000;
-      const next = shown[(shown.findIndex(r => r.pid === focusPid) + 1) % shown.length];
+      if (turn.length < 2 && turn[0]?.pid === focusPid) return;
+      const next = turn[(turn.findIndex(r => r.pid === focusPid) + 1) % turn.length];
       setFocus(next.pid); setFollow(true);
     }, 1000);
   }
